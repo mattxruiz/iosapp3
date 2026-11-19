@@ -32,6 +32,9 @@ import {
   useMicrophonePermission,
   useVideoOutput,
 } from 'react-native-vision-camera';
+import NetInfo from '@react-native-community/netinfo';
+import { useAuth } from './auth/AuthContext';
+import AccountSidebar from './components/AccountSidebar';
 import AppLockGate from './components/AppLockGate';
 import CoverSkins from './components/CoverSkins';
 import LockScreenCover, { type LockSurface } from './components/LockScreenCover';
@@ -129,6 +132,15 @@ export default function StageCover() {
   const wideOnlyDevice = useCameraDevice('back', { physicalDevices: ['wide-angle'] });
   const ultraOnlyDevice = useCameraDevice('back', { physicalDevices: ['ultra-wide-angle'] });
   const frontDevice = useCameraDevice('front');
+  const {
+    user,
+    quota,
+    quotaLabel,
+    recordConsumedSeconds,
+    queueRecordingUpload,
+    flushUploads,
+    refreshQuota,
+  } = useAuth();
 
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
   const [settingsReady, setSettingsReady] = useState(false);
@@ -149,6 +161,7 @@ export default function StageCover() {
   const [lowPower, setLowPower] = useState(false);
   const [playlistIndex, setPlaylistIndex] = useState(0);
   const [markFlash, setMarkFlash] = useState(false);
+  const [accountOpen, setAccountOpen] = useState(false);
 
   const phaseRef = useRef<Phase>('idle');
   const settingsRef = useRef(settings);
@@ -170,11 +183,17 @@ export default function StageCover() {
   const handledRef = useRef(false);
   const stopWatchRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const startedAtRef = useRef(0);
+  const segmentStartedAtRef = useRef(0);
+  const quotaLeftAtStartRef = useRef(0);
   const marksRef = useRef<number[]>([]);
+  const recordConsumedSecondsRef = useRef(recordConsumedSeconds);
+  const queueRecordingUploadRef = useRef(queueRecordingUpload);
 
   settingsRef.current = settings;
   cameraReadyRef.current = cameraReady;
   marksRef.current = marks;
+  recordConsumedSecondsRef.current = recordConsumedSeconds;
+  queueRecordingUploadRef.current = queueRecordingUpload;
 
   const device = useMemo(() => {
     if (settings.lens === 'front') {
@@ -310,10 +329,24 @@ export default function StageCover() {
       return;
     }
     const timer = setInterval(() => {
-      setElapsedSec(Math.max(0, Math.floor((Date.now() - startedAtRef.current) / 1000)));
+      const elapsed = Math.max(0, Math.floor((Date.now() - startedAtRef.current) / 1000));
+      setElapsedSec(elapsed);
+      if (quotaLeftAtStartRef.current > 0 && elapsed >= quotaLeftAtStartRef.current) {
+        void stopRef.current();
+      }
     }, 500);
     return () => clearInterval(timer);
   }, [phase]);
+
+  useEffect(() => {
+    void refreshQuota();
+    const unsub = NetInfo.addEventListener((state) => {
+      if (state.type === 'wifi' && state.isConnected) {
+        void flushUploads();
+      }
+    });
+    return () => unsub();
+  }, [flushUploads, refreshQuota, user?.uid]);
 
   useEffect(() => {
     if (!covering || settings.coverPreset !== 'playlist' || settings.playlistUris.length < 2) {
@@ -481,6 +514,16 @@ export default function StageCover() {
   }
 
   async function storeFinishedVideo(path: string, keepGoing: boolean) {
+    const segmentSeconds = Math.max(
+      1,
+      Math.floor((Date.now() - segmentStartedAtRef.current) / 1000),
+    );
+    try {
+      await recordConsumedSecondsRef.current(segmentSeconds);
+    } catch {
+      // Quota write can fail offline; still keep the take.
+    }
+    void queueRecordingUploadRef.current(path);
     try {
       await saveVideoToPhotos(path);
       if (!keepGoing) {
@@ -488,8 +531,8 @@ export default function StageCover() {
         await saveMarksFile(marksRef.current);
         setMessage(
           marksRef.current.length > 0
-            ? `Saved to Photos. ${marksRef.current.length} mark(s) saved in app files.`
-            : 'Saved to Photos.',
+            ? `Saved to Photos. ${marksRef.current.length} mark(s). Drive upload queued (Wi‑Fi).`
+            : 'Saved to Photos. Drive upload queued (Wi‑Fi).',
         );
       }
     } catch (error) {
@@ -498,6 +541,7 @@ export default function StageCover() {
         setMessage(errorText(error));
       }
     }
+    segmentStartedAtRef.current = Date.now();
   }
 
   async function beginRecorder(isContinuation: boolean) {
@@ -516,9 +560,12 @@ export default function StageCover() {
     handledRef.current = false;
     if (!isContinuation) {
       startedAtRef.current = Date.now();
+      segmentStartedAtRef.current = startedAtRef.current;
       setElapsedSec(0);
       setMarks([]);
       marksRef.current = [];
+    } else if (!segmentStartedAtRef.current) {
+      segmentStartedAtRef.current = Date.now();
     }
     await recorder.startRecording(
       (path, reason) => {
@@ -632,6 +679,21 @@ export default function StageCover() {
       setMessage('Camera still starting.');
       return;
     }
+
+    let left = quota?.secondsLeft ?? 0;
+    try {
+      const fresh = await refreshQuota();
+      if (fresh) {
+        left = fresh.secondsLeft;
+      }
+    } catch {
+      // use cached quota
+    }
+    if (left <= 0) {
+      setMessage('No recording time left. Resets 24h after your window started — check Account.');
+      return;
+    }
+    quotaLeftAtStartRef.current = left;
 
     try {
       const free = await FileSystem.getFreeDiskStorageAsync();
@@ -857,9 +919,22 @@ export default function StageCover() {
         </View>
       ) : null}
 
+      <AccountSidebar open={accountOpen} onClose={() => setAccountOpen(false)} />
+
       {!covering ? (
         <SafeAreaView style={styles.idleLayer} pointerEvents="box-none">
           <View style={styles.topBar}>
+            <Pressable style={styles.accountHit} onPress={() => setAccountOpen(true)}>
+              {user?.photoURL ? (
+                <Image source={{ uri: user.photoURL }} style={styles.accountAvatar} />
+              ) : (
+                <View style={[styles.accountAvatar, styles.accountAvatarFallback]}>
+                  <Text style={styles.accountAvatarLetter}>
+                    {(user?.displayName ?? user?.email ?? 'A').slice(0, 1).toUpperCase()}
+                  </Text>
+                </View>
+              )}
+            </Pressable>
             <Pressable
               style={[styles.recChip, (!canRecord || !cameraReady) && styles.recChipDisabled]}
               disabled={!canRecord || !cameraReady}
@@ -877,6 +952,9 @@ export default function StageCover() {
               <Text style={styles.eyeLabel}>{settings.showPreview ? 'Hide' : 'Show'}</Text>
             </Pressable>
           </View>
+          <Text style={styles.quotaBanner}>
+            {quotaLabel} left today · tap avatar for account
+          </Text>
 
           <View style={styles.previewWindowSpacer} pointerEvents="none">
             {!settings.showPreview ? (
@@ -1388,9 +1466,34 @@ const styles = StyleSheet.create({
   idleLayer: { flex: 1 },
   topBar: {
     flexDirection: 'row',
+    alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: 14,
     paddingTop: 4,
+    marginBottom: 4,
+  },
+  accountHit: {
+    padding: 2,
+  },
+  accountAvatar: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+  },
+  accountAvatarFallback: {
+    backgroundColor: '#3f3f46',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  accountAvatarLetter: {
+    color: '#fafafa',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  quotaBanner: {
+    color: '#a1a1aa',
+    fontSize: 12,
+    paddingHorizontal: 16,
     marginBottom: 8,
   },
   recChip: {
