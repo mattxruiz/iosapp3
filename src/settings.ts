@@ -2,7 +2,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as FileSystem from 'expo-file-system/legacy';
 import { CommonResolutions, type Size } from 'react-native-vision-camera';
 
-const STORAGE_KEY = 'stage-cover-settings-v2';
+const STORAGE_KEY = 'stage-cover-settings-v3';
 const COVER_FILE = 'stage-cover-screen.jpg';
 const LOCK_WALL_FILE = 'stage-lock-wallpaper.jpg';
 const HOME_SHOT_FILE = 'stage-home-shot.jpg';
@@ -47,13 +47,15 @@ export type Settings = {
   lockWallpaperUri: string | null;
   homeShotUri: string | null;
   lockPin: string;
+  appLockEnabled: boolean;
+  appLockPin: string;
 };
 
 export const DEFAULT_SETTINGS: Settings = {
   resolution: '1080',
   fps: 30,
   flash: false,
-  mic: true,
+  mic: false,
   lowLight: true,
   lens: 'ultra',
   fit: 'fill',
@@ -65,7 +67,9 @@ export const DEFAULT_SETTINGS: Settings = {
   activeTextPresetId: null,
   lockWallpaperUri: null,
   homeShotUri: null,
-  lockPin: '000000',
+  lockPin: '',
+  appLockEnabled: false,
+  appLockPin: '',
 };
 
 export const RESOLUTION_SIZE: Record<ResolutionId, Size> = {
@@ -92,30 +96,32 @@ async function fileOrNull(uri: string | null | undefined): Promise<string | null
   }
 }
 
+function migrate(raw: Partial<Settings>): Settings {
+  return {
+    ...DEFAULT_SETTINGS,
+    ...raw,
+    lockPin: typeof raw.lockPin === 'string' ? raw.lockPin.replace(/[^0-9]/g, '').slice(0, 6) : '',
+    appLockPin:
+      typeof raw.appLockPin === 'string' ? raw.appLockPin.replace(/[^0-9]/g, '').slice(0, 6) : '',
+    textPresets: Array.isArray(raw.textPresets) ? raw.textPresets : [],
+  };
+}
+
 export async function loadSettings(): Promise<Settings> {
   try {
-    const raw = await AsyncStorage.getItem(STORAGE_KEY);
+    const raw =
+      (await AsyncStorage.getItem(STORAGE_KEY)) ??
+      (await AsyncStorage.getItem('stage-cover-settings-v2')) ??
+      (await AsyncStorage.getItem('stage-cover-settings-v1'));
     if (!raw) {
-      const legacy = await AsyncStorage.getItem('stage-cover-settings-v1');
-      if (!legacy) {
-        return DEFAULT_SETTINGS;
-      }
-      const parsed = JSON.parse(legacy) as Partial<Settings>;
-      return {
-        ...DEFAULT_SETTINGS,
-        ...parsed,
-        coverUri: await fileOrNull(parsed.coverUri ?? null),
-      };
+      return DEFAULT_SETTINGS;
     }
-    const parsed = JSON.parse(raw) as Partial<Settings>;
+    const parsed = migrate(JSON.parse(raw) as Partial<Settings>);
     return {
-      ...DEFAULT_SETTINGS,
       ...parsed,
-      coverUri: await fileOrNull(parsed.coverUri ?? null),
-      lockWallpaperUri: await fileOrNull(parsed.lockWallpaperUri ?? null),
-      homeShotUri: await fileOrNull(parsed.homeShotUri ?? null),
-      textPresets: Array.isArray(parsed.textPresets) ? parsed.textPresets : [],
-      lockPin: typeof parsed.lockPin === 'string' && parsed.lockPin.length >= 4 ? parsed.lockPin : '000000',
+      coverUri: await fileOrNull(parsed.coverUri),
+      lockWallpaperUri: await fileOrNull(parsed.lockWallpaperUri),
+      homeShotUri: await fileOrNull(parsed.homeShotUri),
     };
   } catch {
     return DEFAULT_SETTINGS;

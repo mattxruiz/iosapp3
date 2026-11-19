@@ -24,7 +24,6 @@ type Props = {
 function formatTime(date: Date) {
   let hours = date.getHours();
   const minutes = date.getMinutes().toString().padStart(2, '0');
-  const ampm = hours >= 12 ? 'PM' : 'AM';
   hours = hours % 12;
   if (hours === 0) {
     hours = 12;
@@ -33,7 +32,7 @@ function formatTime(date: Date) {
 }
 
 function formatDate(date: Date) {
-  return date.toLocaleDateString(undefined, {
+  return date.toLocaleDateString('en-US', {
     weekday: 'long',
     month: 'long',
     day: 'numeric',
@@ -70,10 +69,21 @@ export default function LockScreenCover({
   const pan = useMemo(
     () =>
       PanResponder.create({
-        onMoveShouldSetPanResponder: (_event, gesture) =>
-          surface === 'lock' && gesture.dy < -12 && Math.abs(gesture.dy) > Math.abs(gesture.dx),
+        onMoveShouldSetPanResponder: (_event, gesture) => {
+          if (surface !== 'lock') {
+            return false;
+          }
+          const sideways = Math.abs(gesture.dx) > 14 && Math.abs(gesture.dx) > Math.abs(gesture.dy);
+          const upward = gesture.dy < -14 && Math.abs(gesture.dy) > Math.abs(gesture.dx);
+          return sideways || upward;
+        },
         onPanResponderRelease: (_event, gesture) => {
-          if (surface === 'lock' && gesture.dy < -60) {
+          if (surface !== 'lock') {
+            return;
+          }
+          const sideways = Math.abs(gesture.dx) > 56;
+          const upward = gesture.dy < -56;
+          if (sideways || upward) {
             onSwipeToPasscode();
           }
         },
@@ -89,9 +99,9 @@ export default function LockScreenCover({
       setDigits((current) => current.slice(0, -1));
       return;
     }
-    const next = `${digits}${key}`.slice(0, pin.length);
+    const next = `${digits}${key}`.slice(0, pin.length || 6);
     setDigits(next);
-    if (next.length === pin.length) {
+    if (pin.length > 0 && next.length === pin.length) {
       if (next === pin) {
         unlocking.current = true;
         onUnlock();
@@ -100,7 +110,7 @@ export default function LockScreenCover({
         setTimeout(() => {
           setDigits('');
           setShake(false);
-        }, 350);
+        }, 320);
       }
     }
   }
@@ -115,23 +125,7 @@ export default function LockScreenCover({
         {homeShotUri ? (
           <Image source={{ uri: homeShotUri }} style={styles.fillImage} resizeMode="cover" />
         ) : (
-          <View style={styles.fakeHome}>
-            {wallpaperUri ? (
-              <Image source={{ uri: wallpaperUri }} style={styles.fillImage} resizeMode="cover" />
-            ) : (
-              <View style={styles.gradient} />
-            )}
-            <View style={styles.homeGrid}>
-              {Array.from({ length: 12 }).map((_, index) => (
-                <View key={index} style={styles.appIcon} />
-              ))}
-            </View>
-            <View style={styles.dock}>
-              {Array.from({ length: 4 }).map((_, index) => (
-                <View key={index} style={styles.dockIcon} />
-              ))}
-            </View>
-          </View>
+          <View style={styles.gradient} />
         )}
       </View>
     );
@@ -144,25 +138,25 @@ export default function LockScreenCover({
       ) : (
         <View style={styles.gradient} />
       )}
-      <View style={styles.dim} />
 
       {surface === 'lock' ? (
-        <View style={styles.lockContent} pointerEvents="box-none">
-          <Text style={styles.time}>{formatTime(now)}</Text>
-          <Text style={styles.date}>{formatDate(now)}</Text>
-          <View style={styles.lockFooter}>
-            <Text style={styles.swipeHint}>Swipe up to unlock</Text>
-            <View style={styles.homeIndicator} />
+        <>
+          <View style={styles.lockTop}>
+            <Text style={styles.time}>{formatTime(now)}</Text>
+            <Text style={styles.date}>{formatDate(now)}</Text>
           </View>
-        </View>
+          <View style={styles.lockBottom} pointerEvents="none">
+            <View style={styles.flashlight} />
+            <View style={styles.cameraBtn} />
+          </View>
+          <View style={styles.homeIndicator} pointerEvents="none" />
+        </>
       ) : (
-        <View style={styles.passcodeContent}>
-          <Pressable onPress={onBackToLock} style={styles.backHit}>
-            <Text style={styles.backLabel}>Cancel</Text>
-          </Pressable>
+        <View style={styles.passcodeShell}>
+          <View style={styles.passcodeDim} />
           <Text style={styles.passcodeTitle}>Enter Passcode</Text>
           <View style={[styles.dots, shake && styles.dotsShake]}>
-            {Array.from({ length: pin.length }).map((_, index) => (
+            {Array.from({ length: Math.max(pin.length, 6) }).map((_, index) => (
               <View
                 key={index}
                 style={[styles.dot, index < digits.length ? styles.dotFilled : null]}
@@ -170,16 +164,43 @@ export default function LockScreenCover({
             ))}
           </View>
           <View style={styles.pad}>
-            {['1', '2', '3', '4', '5', '6', '7', '8', '9', '', '0', 'del'].map((key) => {
+            {[
+              ['1', ''],
+              ['2', 'A B C'],
+              ['3', 'D E F'],
+              ['4', 'G H I'],
+              ['5', 'J K L'],
+              ['6', 'M N O'],
+              ['7', 'P Q R S'],
+              ['8', 'T U V'],
+              ['9', 'W X Y Z'],
+              ['', ''],
+              ['0', ''],
+              ['del', ''],
+            ].map(([key, letters]) => {
               if (!key) {
-                return <View key="blank" style={styles.key} />;
+                return <View key={`blank-${letters}`} style={styles.key} />;
+              }
+              if (key === 'del') {
+                return (
+                  <Pressable key="del" style={styles.keyGhost} onPress={() => pressKey('del')}>
+                    <Text style={styles.deleteLabel}>Delete</Text>
+                  </Pressable>
+                );
               }
               return (
                 <Pressable key={key} style={styles.key} onPress={() => pressKey(key)}>
-                  <Text style={styles.keyLabel}>{key === 'del' ? '⌫' : key}</Text>
+                  <Text style={styles.keyLabel}>{key}</Text>
+                  {letters ? <Text style={styles.keyLetters}>{letters}</Text> : null}
                 </Pressable>
               );
             })}
+          </View>
+          <View style={styles.passcodeFooter}>
+            <Pressable onPress={onBackToLock}>
+              <Text style={styles.footerAction}>Cancel</Text>
+            </Pressable>
+            <Text style={styles.footerSpacer}>Emergency</Text>
           </View>
         </View>
       )}
@@ -188,7 +209,7 @@ export default function LockScreenCover({
 }
 
 const { width } = Dimensions.get('window');
-const keySize = Math.min(78, (width - 72) / 3);
+const keySize = Math.min(76, (width - 84) / 3);
 
 const styles = StyleSheet.create({
   fill: {
@@ -206,78 +227,81 @@ const styles = StyleSheet.create({
   },
   gradient: {
     ...StyleSheet.absoluteFill,
-    backgroundColor: '#1c2333',
+    backgroundColor: '#152038',
   },
-  dim: {
-    ...StyleSheet.absoluteFill,
-    backgroundColor: 'rgba(0,0,0,0.18)',
-  },
-  lockContent: {
-    flex: 1,
+  lockTop: {
+    marginTop: 92,
     alignItems: 'center',
-    paddingTop: 84,
   },
   time: {
     color: '#fff',
-    fontSize: 84,
-    fontWeight: '300',
+    fontSize: 88,
+    fontWeight: '200',
     letterSpacing: 1,
   },
   date: {
     color: '#fff',
     fontSize: 22,
     fontWeight: '500',
-    marginTop: 2,
+    marginTop: -2,
   },
-  lockFooter: {
+  lockBottom: {
     position: 'absolute',
-    bottom: 28,
-    alignItems: 'center',
-    gap: 14,
+    left: 46,
+    right: 46,
+    bottom: 54,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
   },
-  swipeHint: {
-    color: 'rgba(255,255,255,0.85)',
-    fontSize: 15,
-    fontWeight: '500',
+  flashlight: {
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    backgroundColor: 'rgba(255,255,255,0.18)',
+  },
+  cameraBtn: {
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    backgroundColor: 'rgba(255,255,255,0.18)',
   },
   homeIndicator: {
-    width: 128,
+    position: 'absolute',
+    alignSelf: 'center',
+    bottom: 10,
+    width: 134,
     height: 5,
     borderRadius: 3,
-    backgroundColor: 'rgba(255,255,255,0.9)',
+    backgroundColor: 'rgba(255,255,255,0.92)',
   },
-  passcodeContent: {
-    flex: 1,
+  passcodeShell: {
+    ...StyleSheet.absoluteFill,
     alignItems: 'center',
-    paddingTop: 72,
+    paddingTop: 120,
   },
-  backHit: {
-    position: 'absolute',
-    top: 54,
-    left: 18,
-    padding: 8,
-  },
-  backLabel: {
-    color: '#fff',
-    fontSize: 17,
+  passcodeDim: {
+    ...StyleSheet.absoluteFill,
+    backgroundColor: 'rgba(20,20,22,0.72)',
   },
   passcodeTitle: {
     color: '#fff',
-    fontSize: 18,
-    fontWeight: '500',
+    fontSize: 19,
+    fontWeight: '400',
     marginBottom: 28,
+    zIndex: 1,
   },
   dots: {
     flexDirection: 'row',
-    gap: 18,
-    marginBottom: 36,
+    gap: 20,
+    marginBottom: 42,
+    zIndex: 1,
   },
   dotsShake: {
-    opacity: 0.45,
+    opacity: 0.4,
   },
   dot: {
-    width: 14,
-    height: 14,
+    width: 13,
+    height: 13,
     borderRadius: 7,
     borderWidth: 1.5,
     borderColor: '#fff',
@@ -286,59 +310,60 @@ const styles = StyleSheet.create({
     backgroundColor: '#fff',
   },
   pad: {
-    width: keySize * 3 + 36,
+    width: keySize * 3 + 42,
     flexDirection: 'row',
     flexWrap: 'wrap',
     justifyContent: 'space-between',
-    rowGap: 14,
+    rowGap: 16,
+    zIndex: 1,
   },
   key: {
     width: keySize,
     height: keySize,
     borderRadius: keySize / 2,
-    backgroundColor: 'rgba(255,255,255,0.18)',
+    backgroundColor: 'rgba(255,255,255,0.22)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  keyGhost: {
+    width: keySize,
+    height: keySize,
     alignItems: 'center',
     justifyContent: 'center',
   },
   keyLabel: {
     color: '#fff',
-    fontSize: 32,
+    fontSize: 36,
+    fontWeight: '300',
+  },
+  keyLetters: {
+    color: '#fff',
+    fontSize: 10,
+    fontWeight: '600',
+    letterSpacing: 1.5,
+    marginTop: -2,
+  },
+  deleteLabel: {
+    color: '#fff',
+    fontSize: 16,
     fontWeight: '400',
   },
-  fakeHome: {
-    flex: 1,
-  },
-  homeGrid: {
+  passcodeFooter: {
     position: 'absolute',
-    top: 72,
-    left: 24,
-    right: 24,
+    left: 28,
+    right: 28,
+    bottom: 28,
     flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 22,
+    justifyContent: 'space-between',
+    zIndex: 1,
   },
-  appIcon: {
-    width: 58,
-    height: 58,
-    borderRadius: 14,
-    backgroundColor: 'rgba(255,255,255,0.28)',
+  footerAction: {
+    color: '#fff',
+    fontSize: 16,
   },
-  dock: {
-    position: 'absolute',
-    left: 18,
-    right: 18,
-    bottom: 22,
-    height: 88,
-    borderRadius: 28,
-    backgroundColor: 'rgba(255,255,255,0.22)',
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-evenly',
-  },
-  dockIcon: {
-    width: 54,
-    height: 54,
-    borderRadius: 14,
-    backgroundColor: 'rgba(255,255,255,0.35)',
+  footerSpacer: {
+    color: '#fff',
+    fontSize: 16,
+    opacity: 0.9,
   },
 });
