@@ -2,12 +2,14 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   AppState,
+  Dimensions,
   Image,
   Linking,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from 'react-native';
 import { Asset, requestPermissionsAsync } from 'expo-media-library';
@@ -27,19 +29,26 @@ import {
   useMicrophonePermission,
   useVideoOutput,
 } from 'react-native-vision-camera';
+import LockScreenCover, { type LockSurface } from './components/LockScreenCover';
+import TextPresetEditor from './components/TextPresetEditor';
 import {
   BRIGHTNESS_VALUE,
   type BrightnessId,
+  type CoverPreset,
   DEFAULT_SETTINGS,
   type FitId,
   type FpsId,
   type LensId,
   loadSettings,
+  newTextPreset,
   persistCoverImage,
+  persistHomeShot,
+  persistLockWallpaper,
   type ResolutionId,
   RESOLUTION_SIZE,
   saveSettings,
   type Settings,
+  type TextPreset,
 } from './settings';
 
 type Phase = 'idle' | 'starting' | 'recording' | 'stopping';
@@ -86,6 +95,19 @@ async function saveVideoToPhotos(path: string): Promise<void> {
   await Asset.create(uri);
 }
 
+function coverReady(settings: Settings): boolean {
+  if (settings.coverPreset === 'black') {
+    return true;
+  }
+  if (settings.coverPreset === 'image') {
+    return Boolean(settings.coverUri);
+  }
+  if (settings.coverPreset === 'text') {
+    return Boolean(settings.activeTextPresetId && settings.textPresets.some((item) => item.id === settings.activeTextPresetId));
+  }
+  return Boolean(settings.lockWallpaperUri || settings.homeShotUri);
+}
+
 export default function StageCover() {
   const cameraPermission = useCameraPermission();
   const microphonePermission = useMicrophonePermission();
@@ -105,17 +127,27 @@ export default function StageCover() {
   const [activeFps, setActiveFps] = useState<number | null>(null);
   const [unsavedPath, setUnsavedPath] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [editorDraft, setEditorDraft] = useState<TextPreset | null>(null);
+  const [lockSurface, setLockSurface] = useState<LockSurface>('lock');
+  const lastLitSurfaceRef = useRef<Exclude<LockSurface, 'off'>>('lock');
 
   const phaseRef = useRef<Phase>('idle');
+  const settingsRef = useRef(settings);
+  const lockSurfaceRef = useRef<LockSurface>('lock');
   const recorderRef = useRef<Recorder | null>(null);
   const cancelRef = useRef(false);
   const releaseVolumeRef = useRef<(() => Promise<void>) | null>(null);
   const previousVolumeRef = useRef<number | null>(null);
   const previousBrightnessRef = useRef<number | null>(null);
   const stopRef = useRef<() => Promise<void>>(async () => {});
+  const powerRef = useRef<() => void>(() => {});
   const videoOutputRef = useRef<ReturnType<typeof useVideoOutput> | null>(null);
   const handledRef = useRef(false);
   const stopWatchRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  settingsRef.current = settings;
+  lockSurfaceRef.current = lockSurface;
 
   const device = useMemo(() => {
     if (settings.lens === 'front') {
@@ -152,6 +184,9 @@ export default function StageCover() {
 
   const covering = phase !== 'idle';
   const torchOn = settings.flash && settings.lens !== 'front' && device?.hasTorch === true;
+  const activeText = settings.textPresets.find((item) => item.id === settings.activeTextPresetId) ?? null;
+  const canRecord = coverReady(settings);
+  const previewVisible = settings.showPreview || covering;
 
   function setPhase(next: Phase) {
     phaseRef.current = next;
@@ -201,26 +236,55 @@ export default function StageCover() {
       previousBrightnessRef.current = null;
     }
     await deactivateKeepAwake().catch(() => {});
+    setLockSurface('lock');
+    lastLitSurfaceRef.current = 'lock';
   }
 
-  async function armVolumeStop() {
+  powerRef.current = () => {
+    if (settingsRef.current.coverPreset !== 'lock') {
+      return;
+    }
+    setLockSurface((current) => {
+      if (current === 'off') {
+        void Brightness.setBrightnessAsync(BRIGHTNESS_VALUE[settingsRef.current.brightness]);
+        return lastLitSurfaceRef.current;
+      }
+      lastLitSurfaceRef.current = current;
+      void Brightness.setBrightnessAsync(0);
+      return 'off';
+    });
+  };
+
+  async function armVolumeButtons() {
     const current = await VolumeManager.getVolume();
     previousVolumeRef.current = current.volume;
     let armed = false;
-    const subscription = VolumeManager.addVolumeListener(() => {
+    let lastVolume = 0.5;
+    const subscription = VolumeManager.addVolumeListener((result) => {
       if (!armed) {
+        lastVolume = result.volume;
         return;
       }
-      armed = false;
-      void stopRef.current();
+      const goingUp = result.volume > lastVolume + 0.001 || (lastVolume >= 0.99 && result.volume >= 0.99);
+      const goingDown = result.volume < lastVolume - 0.001 || (lastVolume <= 0.01 && result.volume <= 0.01);
+      lastVolume = result.volume;
+      const lockMode = settingsRef.current.coverPreset === 'lock';
+      if (lockMode && goingUp) {
+        powerRef.current();
+        return;
+      }
+      if (goingDown || !lockMode) {
+        void stopRef.current();
+      }
     });
     await VolumeManager.showNativeVolumeUI({ enabled: false });
     if (Math.abs(current.volume - 0.5) > 0.02) {
       await VolumeManager.setVolume(0.5, { showUI: false, playSound: false });
     }
+    lastVolume = 0.5;
     const armTimer = setTimeout(() => {
       armed = true;
-    }, 400);
+    }, 450);
     releaseVolumeRef.current = async () => {
       clearTimeout(armTimer);
       armed = false;
@@ -303,8 +367,8 @@ export default function StageCover() {
     if (phaseRef.current !== 'idle' || !videoOutputRef.current) {
       return;
     }
-    if (!settings.coverUri) {
-      setMessage('Choose the picture people behind you will see.');
+    if (!canRecord) {
+      setMessage('Pick a cover preset first (picture, black, text, or lock screen).');
       return;
     }
     if (!cameraReady || !device) {
@@ -329,13 +393,15 @@ export default function StageCover() {
     clearStopWatch();
     setMessage(null);
     setUnsavedPath(null);
+    setLockSurface('lock');
+    lastLitSurfaceRef.current = 'lock';
     setPhase('starting');
 
     try {
       await activateKeepAwakeAsync();
       previousBrightnessRef.current = await Brightness.getBrightnessAsync();
       await Brightness.setBrightnessAsync(BRIGHTNESS_VALUE[settings.brightness]);
-      await armVolumeStop();
+      await armVolumeButtons();
       if (cancelRef.current) {
         setPhase('idle');
         await finishCover();
@@ -379,6 +445,9 @@ export default function StageCover() {
         return;
       }
       setPhase('recording');
+      if (settings.coverPreset === 'lock') {
+        setMessage(null);
+      }
     } catch (error) {
       recorderRef.current = null;
       setPhase('idle');
@@ -399,8 +468,42 @@ export default function StageCover() {
     }
     try {
       const coverUri = await persistCoverImage(result.assets[0].uri);
-      setSettings((current) => ({ ...current, coverUri }));
-      setMessage('Picture saved. That is what the screen will show while recording.');
+      setSettings((current) => ({ ...current, coverUri, coverPreset: 'image' }));
+      setMessage('Picture saved for the Image cover preset.');
+    } catch (error) {
+      setMessage(errorText(error));
+    }
+  }
+
+  async function chooseLockWallpaper() {
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ['images'],
+      quality: 0.95,
+    });
+    if (result.canceled || !result.assets[0]) {
+      return;
+    }
+    try {
+      const lockWallpaperUri = await persistLockWallpaper(result.assets[0].uri);
+      setSettings((current) => ({ ...current, lockWallpaperUri, coverPreset: 'lock' }));
+      setMessage('Lock wallpaper saved. Tip: take a screenshot of your real Lock Screen and pick that.');
+    } catch (error) {
+      setMessage(errorText(error));
+    }
+  }
+
+  async function chooseHomeShot() {
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ['images'],
+      quality: 0.95,
+    });
+    if (result.canceled || !result.assets[0]) {
+      return;
+    }
+    try {
+      const homeShotUri = await persistHomeShot(result.assets[0].uri);
+      setSettings((current) => ({ ...current, homeShotUri, coverPreset: 'lock' }));
+      setMessage('Home Screen picture saved. Tip: screenshot your real Home Screen.');
     } catch (error) {
       setMessage(errorText(error));
     }
@@ -422,14 +525,50 @@ export default function StageCover() {
     }
   }
 
+  function setPreset(coverPreset: CoverPreset) {
+    setSettings((current) => ({ ...current, coverPreset }));
+  }
+
+  function openNewTextEditor() {
+    const draft = newTextPreset(`Text ${settings.textPresets.length + 1}`);
+    setEditorDraft(draft);
+    setEditorOpen(true);
+  }
+
+  function openEditTextEditor() {
+    if (!activeText) {
+      openNewTextEditor();
+      return;
+    }
+    setEditorDraft(activeText);
+    setEditorOpen(true);
+  }
+
+  function saveTextPreset(preset: TextPreset) {
+    setSettings((current) => {
+      const exists = current.textPresets.some((item) => item.id === preset.id);
+      return {
+        ...current,
+        coverPreset: 'text',
+        activeTextPresetId: preset.id,
+        textPresets: exists
+          ? current.textPresets.map((item) => (item.id === preset.id ? preset : item))
+          : [...current.textPresets, preset],
+      };
+    });
+    setEditorOpen(false);
+    setEditorDraft(null);
+    setMessage('Text cover saved.');
+  }
+
   if (!cameraPermission.hasPermission) {
     return (
       <SafeAreaView style={styles.permissionScreen}>
         <StatusBar style="light" />
         <Text style={styles.title}>Stage Cover</Text>
         <Text style={styles.body}>
-          This records the play with the camera, then covers the whole screen with your picture so
-          the people behind you are not looking at a bright camera app.
+          Records the play under a cover screen so people behind you are not staring at a bright
+          camera app.
         </Text>
         <Pressable
           style={styles.recordButton}
@@ -452,7 +591,7 @@ export default function StageCover() {
   return (
     <View style={styles.root}>
       <StatusBar hidden={covering} style="light" />
-      {device ? (
+      {device && previewVisible ? (
         <Camera
           style={StyleSheet.absoluteFill}
           device={device}
@@ -461,9 +600,7 @@ export default function StageCover() {
           constraints={constraints}
           torchMode={torchOn ? 'on' : 'off'}
           zoom={zoom}
-          enableLowLightBoost={
-            device.supportsLowLightBoost ? settings.lowLight : undefined
-          }
+          enableLowLightBoost={device.supportsLowLightBoost ? settings.lowLight : undefined}
           resizeMode="cover"
           onStarted={() => setCameraReady(true)}
           onStopped={() => setCameraReady(false)}
@@ -477,22 +614,84 @@ export default function StageCover() {
           }}
         />
       ) : (
-        <View style={styles.missingCamera}>
-          <Text style={styles.body}>This iPhone does not have that camera.</Text>
+        <View style={styles.previewOff}>
+          <Text style={styles.previewOffLabel}>Camera preview hidden</Text>
         </View>
       )}
 
-      {covering && settings.coverUri ? (
+      {!covering ? (
+        <SafeAreaView style={styles.idleChrome} pointerEvents="box-none">
+          <Pressable
+            style={styles.eyeHit}
+            onPress={() =>
+              setSettings((current) => ({ ...current, showPreview: !current.showPreview }))
+            }
+          >
+            <Text style={styles.eyeIcon}>{settings.showPreview ? '👁' : '🙈'}</Text>
+            <Text style={styles.eyeLabel}>{settings.showPreview ? 'Hide preview' : 'Show preview'}</Text>
+          </Pressable>
+        </SafeAreaView>
+      ) : null}
+
+      {covering ? (
         <View
           style={styles.cover}
           onStartShouldSetResponder={() => true}
           onMoveShouldSetResponder={() => true}
         >
-          <Image
-            source={{ uri: settings.coverUri }}
-            style={styles.coverImage}
-            resizeMode={settings.fit === 'fill' ? 'cover' : 'contain'}
-          />
+          {settings.coverPreset === 'black' ? <View style={styles.blackCover} /> : null}
+
+          {settings.coverPreset === 'image' && settings.coverUri ? (
+            <Image
+              source={{ uri: settings.coverUri }}
+              style={styles.coverImage}
+              resizeMode={settings.fit === 'fill' ? 'cover' : 'contain'}
+            />
+          ) : null}
+
+          {settings.coverPreset === 'text' && activeText ? (
+            <View style={[styles.blackCover, { backgroundColor: activeText.background }]}>
+              {activeText.layers.map((layer) => (
+                <Text
+                  key={layer.id}
+                  style={{
+                    position: 'absolute',
+                    left: layer.x * Dimensions.get('window').width - 90,
+                    top: layer.y * Dimensions.get('window').height - 20,
+                    width: 180,
+                    textAlign: 'center',
+                    color: layer.color,
+                    fontSize: layer.size,
+                    fontWeight: '700',
+                  }}
+                >
+                  {layer.text}
+                </Text>
+              ))}
+            </View>
+          ) : null}
+
+          {settings.coverPreset === 'lock' ? (
+            <LockScreenCover
+              surface={lockSurface}
+              wallpaperUri={settings.lockWallpaperUri}
+              homeShotUri={settings.homeShotUri}
+              pin={settings.lockPin}
+              onSwipeToPasscode={() => {
+                lastLitSurfaceRef.current = 'passcode';
+                setLockSurface('passcode');
+              }}
+              onUnlock={() => {
+                lastLitSurfaceRef.current = 'home';
+                setLockSurface('home');
+              }}
+              onBackToLock={() => {
+                lastLitSurfaceRef.current = 'lock';
+                setLockSurface('lock');
+              }}
+            />
+          ) : null}
+
         </View>
       ) : (
         <SafeAreaView style={styles.controlsLayer} pointerEvents="box-none">
@@ -504,15 +703,134 @@ export default function StageCover() {
           >
             <Text style={styles.title}>Stage Cover</Text>
             <Text style={styles.body}>
-              Frame the stage in the picture above. Press record and the screen becomes your
-              picture. Press volume up or volume down to stop. Taps do nothing while it is
-              recording.
+              Preview fills most of the screen. Tap the eye at the top to hide it. Press Record and
+              the cover takes over. Volume down stops. In Lock Screen mode, volume up acts like the
+              power button.
             </Text>
             {activeFps != null ? (
-              <Text style={styles.note}>
-                The phone is set to record at {activeFps} fps. An iPhone 14 does 4K at 30 fps, and
-                60 fps at 1080p or 720p.
-              </Text>
+              <Text style={styles.note}>Camera negotiated {activeFps} fps for this setup.</Text>
+            ) : null}
+
+            <Text style={styles.label}>Cover preset</Text>
+            <OptionRow<CoverPreset>
+              options={[
+                { id: 'image', label: 'Image' },
+                { id: 'black', label: 'Black' },
+                { id: 'text', label: 'Text' },
+                { id: 'lock', label: 'Lock' },
+              ]}
+              selected={settings.coverPreset}
+              onSelect={setPreset}
+            />
+
+            {settings.coverPreset === 'image' ? (
+              <>
+                <Pressable style={styles.secondaryButton} onPress={() => void chooseCover()}>
+                  {settings.coverUri ? (
+                    <Image source={{ uri: settings.coverUri }} style={styles.thumb} />
+                  ) : null}
+                  <Text style={styles.secondaryLabel}>
+                    {settings.coverUri ? 'Change picture' : 'Choose picture'}
+                  </Text>
+                </Pressable>
+                <OptionRow<FitId>
+                  options={[
+                    { id: 'fill', label: 'Fill screen' },
+                    { id: 'fit', label: 'Show all' },
+                  ]}
+                  selected={settings.fit}
+                  onSelect={(fit) => setSettings((current) => ({ ...current, fit }))}
+                />
+              </>
+            ) : null}
+
+            {settings.coverPreset === 'black' ? (
+              <Text style={styles.note}>Full black screen while the camera keeps recording.</Text>
+            ) : null}
+
+            {settings.coverPreset === 'text' ? (
+              <>
+                <Pressable style={styles.secondaryButton} onPress={openEditTextEditor}>
+                  <Text style={styles.secondaryLabel}>
+                    {activeText ? `Edit “${activeText.name}”` : 'Make text cover'}
+                  </Text>
+                </Pressable>
+                <Pressable style={styles.secondaryButton} onPress={openNewTextEditor}>
+                  <Text style={styles.secondaryLabel}>New text cover</Text>
+                </Pressable>
+                {settings.textPresets.length > 0 ? (
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.presetRow}>
+                    {settings.textPresets.map((preset) => (
+                      <Pressable
+                        key={preset.id}
+                        style={[
+                          styles.presetChip,
+                          preset.id === settings.activeTextPresetId && styles.presetChipOn,
+                        ]}
+                        onPress={() =>
+                          setSettings((current) => ({
+                            ...current,
+                            activeTextPresetId: preset.id,
+                            coverPreset: 'text',
+                          }))
+                        }
+                      >
+                        <Text
+                          style={[
+                            styles.presetChipLabel,
+                            preset.id === settings.activeTextPresetId && styles.chipLabelActive,
+                          ]}
+                        >
+                          {preset.name}
+                        </Text>
+                      </Pressable>
+                    ))}
+                  </ScrollView>
+                ) : null}
+              </>
+            ) : null}
+
+            {settings.coverPreset === 'lock' ? (
+              <>
+                <Text style={styles.note}>
+                  iOS will not hand over your real Lock Screen. Use screenshots of your Lock Screen
+                  and Home Screen so it looks like yours. Set the fake passcode to the same digits
+                  you use if you want it to feel real. While recording: volume up = screen off/on,
+                  volume down = stop.
+                </Text>
+                <Pressable style={styles.secondaryButton} onPress={() => void chooseLockWallpaper()}>
+                  {settings.lockWallpaperUri ? (
+                    <Image source={{ uri: settings.lockWallpaperUri }} style={styles.thumb} />
+                  ) : null}
+                  <Text style={styles.secondaryLabel}>
+                    {settings.lockWallpaperUri ? 'Change lock picture' : 'Lock Screen picture'}
+                  </Text>
+                </Pressable>
+                <Pressable style={styles.secondaryButton} onPress={() => void chooseHomeShot()}>
+                  {settings.homeShotUri ? (
+                    <Image source={{ uri: settings.homeShotUri }} style={styles.thumb} />
+                  ) : null}
+                  <Text style={styles.secondaryLabel}>
+                    {settings.homeShotUri ? 'Change home picture' : 'Home Screen picture'}
+                  </Text>
+                </Pressable>
+                <Text style={styles.label}>Fake unlock passcode</Text>
+                <TextInput
+                  style={styles.pinInput}
+                  value={settings.lockPin}
+                  onChangeText={(lockPin) =>
+                    setSettings((current) => ({
+                      ...current,
+                      lockPin: lockPin.replace(/[^0-9]/g, '').slice(0, 6),
+                    }))
+                  }
+                  keyboardType="number-pad"
+                  secureTextEntry
+                  maxLength={6}
+                  placeholder="000000"
+                  placeholderTextColor="#71717a"
+                />
+              </>
             ) : null}
 
             <Text style={styles.label}>Resolution</Text>
@@ -545,10 +863,6 @@ export default function StageCover() {
               selected={settings.lens}
               onSelect={(lens) => setSettings((current) => ({ ...current, lens }))}
             />
-            <Text style={styles.note}>
-              Look at the preview. 0.5 should show more of the stage than 1x. Selfie uses the
-              screen side of the phone.
-            </Text>
 
             <Text style={styles.label}>Flash</Text>
             <OptionRow
@@ -561,11 +875,6 @@ export default function StageCover() {
                 setSettings((current) => ({ ...current, flash: value === 'on' }))
               }
             />
-            {settings.flash ? (
-              <Text style={styles.warning}>
-                Flash lights the stage. Leave it off during the play.
-              </Text>
-            ) : null}
 
             <Text style={styles.label}>Sound</Text>
             <OptionRow
@@ -589,28 +898,7 @@ export default function StageCover() {
               }
             />
 
-            <Text style={styles.label}>Picture on the screen</Text>
-            <Pressable style={styles.secondaryButton} onPress={() => void chooseCover()}>
-              {settings.coverUri ? (
-                <Image source={{ uri: settings.coverUri }} style={styles.thumb} />
-              ) : null}
-              <Text style={styles.secondaryLabel}>
-                {settings.coverUri ? 'Change picture' : 'Choose picture'}
-              </Text>
-            </Pressable>
-            <OptionRow<FitId>
-              options={[
-                { id: 'fill', label: 'Fill screen' },
-                { id: 'fit', label: 'Show all' },
-              ]}
-              selected={settings.fit}
-              onSelect={(fit) => setSettings((current) => ({ ...current, fit }))}
-            />
-            <Text style={styles.note}>
-              Use a picture of your social @. If the handle gets cut off, choose Show all.
-            </Text>
-
-            <Text style={styles.label}>How bright that picture is</Text>
+            <Text style={styles.label}>Cover brightness</Text>
             <OptionRow<BrightnessId>
               options={[
                 { id: 'dim', label: 'Dim' },
@@ -618,28 +906,18 @@ export default function StageCover() {
                 { id: 'bright', label: 'Bright' },
               ]}
               selected={settings.brightness}
-              onSelect={(brightness) =>
-                setSettings((current) => ({ ...current, brightness }))
-              }
+              onSelect={(brightness) => setSettings((current) => ({ ...current, brightness }))}
             />
 
             <Pressable
-              style={[styles.recordButton, !settings.coverUri && styles.recordDisabled]}
-              disabled={!settings.coverUri || !cameraReady}
+              style={[styles.recordButton, !canRecord && styles.recordDisabled]}
+              disabled={!canRecord || !cameraReady}
               onPress={() => void startRecording()}
             >
               <Text style={styles.recordLabel}>
-                {!settings.coverUri
-                  ? 'Choose a picture first'
-                  : cameraReady
-                    ? 'Record'
-                    : 'Camera starting'}
+                {!canRecord ? 'Set up a cover first' : cameraReady ? 'Record' : 'Camera starting'}
               </Text>
             </Pressable>
-            <Text style={styles.note}>
-              Do one short test at home. For a whole play, 1080p at 30 fps uses less space and
-              stays cooler than 4K. Do not lock the phone, and do not swipe down from the corner.
-            </Text>
 
             {message ? <Text style={styles.message}>{message}</Text> : null}
             {saving ? <ActivityIndicator color="#ffffff" /> : null}
@@ -651,6 +929,18 @@ export default function StageCover() {
           </ScrollView>
         </SafeAreaView>
       )}
+
+      {editorDraft ? (
+        <TextPresetEditor
+          visible={editorOpen}
+          initial={editorDraft}
+          onCancel={() => {
+            setEditorOpen(false);
+            setEditorDraft(null);
+          }}
+          onSave={saveTextPreset}
+        />
+      ) : null}
     </View>
   );
 }
@@ -694,6 +984,43 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     gap: 16,
   },
+  idleChrome: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    zIndex: 5,
+  },
+  eyeHit: {
+    alignSelf: 'flex-end',
+    marginTop: 8,
+    marginRight: 14,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    borderRadius: 18,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  eyeIcon: {
+    fontSize: 16,
+  },
+  eyeLabel: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  previewOff: {
+    ...StyleSheet.absoluteFill,
+    backgroundColor: '#09090b',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  previewOffLabel: {
+    color: '#71717a',
+    fontSize: 16,
+  },
   controlsLayer: {
     flex: 1,
     justifyContent: 'flex-end',
@@ -702,7 +1029,7 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   panel: {
-    maxHeight: '62%',
+    maxHeight: '46%',
     backgroundColor: 'rgba(12,12,14,0.94)',
     borderTopLeftRadius: 20,
     borderTopRightRadius: 20,
@@ -720,8 +1047,8 @@ const styles = StyleSheet.create({
   },
   body: {
     color: '#d4d4d8',
-    fontSize: 16,
-    lineHeight: 22,
+    fontSize: 15,
+    lineHeight: 21,
   },
   label: {
     color: '#ffffff',
@@ -733,11 +1060,6 @@ const styles = StyleSheet.create({
     color: '#a1a1aa',
     fontSize: 13,
     lineHeight: 18,
-  },
-  warning: {
-    color: '#fbbf24',
-    fontSize: 14,
-    lineHeight: 19,
   },
   message: {
     color: '#ffffff',
@@ -754,26 +1076,26 @@ const styles = StyleSheet.create({
   },
   chip: {
     flex: 1,
-    minHeight: 46,
+    minHeight: 44,
     borderRadius: 12,
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: '#2a2a2e',
-    paddingHorizontal: 8,
+    paddingHorizontal: 6,
   },
   chipActive: {
     backgroundColor: '#f4f4f5',
   },
   chipLabel: {
     color: '#f4f4f5',
-    fontSize: 15,
+    fontSize: 14,
     fontWeight: '600',
   },
   chipLabelActive: {
     color: '#111111',
   },
   secondaryButton: {
-    minHeight: 56,
+    minHeight: 52,
     borderRadius: 14,
     backgroundColor: '#2a2a2e',
     alignItems: 'center',
@@ -784,7 +1106,7 @@ const styles = StyleSheet.create({
   },
   secondaryLabel: {
     color: '#ffffff',
-    fontSize: 17,
+    fontSize: 16,
     fontWeight: '600',
   },
   thumb: {
@@ -794,8 +1116,8 @@ const styles = StyleSheet.create({
     backgroundColor: '#000000',
   },
   recordButton: {
-    minHeight: 76,
-    borderRadius: 38,
+    minHeight: 72,
+    borderRadius: 36,
     backgroundColor: '#e11d2e',
     alignItems: 'center',
     justifyContent: 'center',
@@ -806,7 +1128,7 @@ const styles = StyleSheet.create({
   },
   recordLabel: {
     color: '#ffffff',
-    fontSize: 22,
+    fontSize: 20,
     fontWeight: '700',
   },
   cover: {
@@ -818,10 +1140,37 @@ const styles = StyleSheet.create({
     height: '100%',
     backgroundColor: '#000000',
   },
-  missingCamera: {
-    flex: 1,
+  blackCover: {
+    ...StyleSheet.absoluteFill,
+    backgroundColor: '#000000',
+  },
+  pinInput: {
+    borderRadius: 12,
+    backgroundColor: '#1c1c1e',
+    color: '#fff',
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    fontSize: 20,
+    letterSpacing: 6,
+    textAlign: 'center',
+  },
+  presetRow: {
+    maxHeight: 48,
+  },
+  presetChip: {
+    marginRight: 8,
+    paddingHorizontal: 14,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: '#2a2a2e',
     alignItems: 'center',
     justifyContent: 'center',
-    padding: 24,
+  },
+  presetChipOn: {
+    backgroundColor: '#f4f4f5',
+  },
+  presetChipLabel: {
+    color: '#fff',
+    fontWeight: '600',
   },
 });

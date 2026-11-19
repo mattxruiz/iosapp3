@@ -7,12 +7,19 @@ The video is saved to the iPhone Photos app.
 ## Before the play
 
 1. Open Stage Cover and allow the camera, microphone, and Photos access.
-2. Choose the picture people behind you should see.
-3. Point the preview at the stage. Use **0.5 wide** if you need the whole stage, **1x** for a tighter view, or **Selfie** for the screen-side camera.
-4. Leave **Flash off**. Flash would light up the stage and the people around you.
-5. For a full-length play, use **1080p** and **30 fps**. 4K is sharper and fills the phone faster. An iPhone 14 records 4K at 30 fps. 60 fps is available at 1080p and 720p. If a combination is not supported, the phone uses the closest one.
-6. Do one short test at home. Press record, confirm the screen is only your picture, then press a volume button. Open Photos and play the clip.
-7. At the show, do not lock the phone and do not swipe down from the top corner. Either one can interrupt the recording. The screen stays awake on its own. If a volume button does not stop the recording, swipe up and close Stage Cover. That take may not be saved.
+2. Pick a **cover preset**:
+   - **Image** — your own picture (social @, etc.)
+   - **Black** — full black screen
+   - **Text** — make black cards with custom text, move/size/color, save presets
+   - **Lock** — fake Lock Screen / passcode / Home Screen. Add screenshots of your real Lock Screen and Home Screen. Set the fake passcode. While recording: **volume up = power button** (black ↔ wake), **volume down = stop**
+3. The live camera preview fills most of the screen. Tap the **eye** at the top to hide or show it.
+4. Point the preview at the stage. Use **0.5 wide** if you need the whole stage, **1x** for a tighter view, or **Selfie** for the screen-side camera.
+5. Leave **Flash off**. Flash would light up the stage and the people around you.
+6. For a full-length play, use **1080p** and **30 fps**. 4K is sharper and fills the phone faster. An iPhone 14 records 4K at 30 fps. 60 fps is available at 1080p and 720p. If a combination is not supported, the phone uses the closest one.
+7. Do one short test at home. Press record, confirm the cover looks right, then stop with **volume down**. Open Photos and play the clip.
+8. At the show, do not lock the phone and do not swipe down from the top corner. Either one can interrupt the recording. The screen stays awake on its own. If volume down does not stop the recording, swipe up and close Stage Cover. That take may not be saved.
+
+iOS will not give apps your real Lock Screen. Screenshots of your Lock Screen and Home Screen are what make Lock mode look like your phone.
 
 A free Apple ID install expires after 7 days. Install Stage Cover the day before the play, or the morning of the play.
 
