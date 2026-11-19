@@ -9,7 +9,8 @@ jobs:
     timeout-minutes: 90
     env:
       # Bump this if a warm cache ever looks broken.
-      CACHE_EPOCH: v2
+      # Bump when app.json plugins / native config change so prebuild is not skipped on a bad cache.
+      CACHE_EPOCH: v3
     steps:
       - name: Check out the app
         uses: actions/checkout@v4

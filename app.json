@@ -58,14 +58,13 @@
           "granularPermissions": ["video"]
         }
       ],
-      "expo-brightness",
-      "expo-battery",
       [
         "expo-screen-orientation",
         {
           "startOrientation": "DEFAULT"
         }
-      ]
+      ],
+      "expo-secure-store"
     ]
   }
 }
