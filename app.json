@@ -1,0 +1,56 @@
+{
+  "expo": {
+    "name": "Stage Cover",
+    "slug": "stage-cover",
+    "version": "1.0.0",
+    "orientation": "default",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": true,
+    "ios": {
+      "bundleIdentifier": "com.mattruiz.stagecover",
+      "supportsTablet": false,
+      "infoPlist": {
+        "NSCameraUsageDescription": "Stage Cover uses the camera to record the play.",
+        "NSMicrophoneUsageDescription": "Stage Cover records the play's sound with the video.",
+        "ITSAppUsesNonExemptEncryption": false
+      }
+    },
+    "android": {
+      "package": "com.mattruiz.stagecover",
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO"
+      ],
+      "adaptiveIcon": {
+        "backgroundColor": "#111111",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Stage Cover uses a picture from your library as the screen while it records.",
+          "cameraPermission": "Stage Cover uses the camera to record the play.",
+          "microphonePermission": "Stage Cover records the play's sound with the video."
+        }
+      ],
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "Stage Cover uses a picture from your library as the screen while it records.",
+          "savePhotosPermission": "Stage Cover saves the recording to Photos.",
+          "granularPermissions": ["video"]
+        }
+      ],
+      "expo-brightness"
+    ]
+  }
+}
