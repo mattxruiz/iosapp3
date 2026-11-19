@@ -39,8 +39,6 @@ import RecordingHud from './components/RecordingHud';
 import TextPresetEditor from './components/TextPresetEditor';
 import {
   applyShowPreset,
-  BRIGHTNESS_VALUE,
-  type BrightnessId,
   type CoverPreset,
   coverReady,
   DEFAULT_SETTINGS,
@@ -173,7 +171,6 @@ export default function StageCover() {
   const stopWatchRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const startedAtRef = useRef(0);
   const marksRef = useRef<number[]>([]);
-  const lastUpTapRef = useRef(0);
 
   settingsRef.current = settings;
   cameraReadyRef.current = cameraReady;
@@ -264,13 +261,20 @@ export default function StageCover() {
 
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (state) => {
-      const active = state === 'active';
-      setAppActive(active);
-      if (!active) {
-        void stopRef.current();
-        if (settingsRef.current.appLockEnabled && settingsRef.current.appLockPin.length >= 4) {
-          setAppUnlocked(false);
-        }
+      // Control Center / notification shade = "inactive". Keep recording.
+      // Only treat true background (left the app) as leave-app.
+      if (state === 'active') {
+        setAppActive(true);
+        return;
+      }
+      if (state === 'inactive') {
+        setAppActive(true);
+        return;
+      }
+      setAppActive(false);
+      void stopRef.current();
+      if (settingsRef.current.appLockEnabled && settingsRef.current.appLockPin.length >= 4) {
+        setAppUnlocked(false);
       }
     });
     return () => subscription.remove();
@@ -392,14 +396,17 @@ export default function StageCover() {
     }
     setLockSurface((current) => {
       if (current === 'off') {
-        const brightness = settingsRef.current.batterySaver
-          ? Math.min(BRIGHTNESS_VALUE[settingsRef.current.brightness], 0.16)
-          : BRIGHTNESS_VALUE[settingsRef.current.brightness];
-        void Brightness.setBrightnessAsync(brightness);
+        // Wake: restore the system brightness we captured when recording started.
+        const restore = previousBrightnessRef.current;
+        if (restore != null) {
+          void Brightness.setBrightnessAsync(restore).catch(() => {});
+        }
+        // Return to wherever they were (home stays home, lock stays lock).
         return lastLitSurfaceRef.current;
       }
+      // Sleep: remember home/passcode/lock, then go fully black.
       lastLitSurfaceRef.current = current;
-      void Brightness.setBrightnessAsync(0);
+      void Brightness.setBrightnessAsync(0).catch(() => {});
       return 'off';
     });
   };
@@ -432,13 +439,7 @@ export default function StageCover() {
       const lockMode = settingsRef.current.coverPreset === 'lock';
       if (goingUp) {
         if (lockMode) {
-          const now = Date.now();
-          if (now - lastUpTapRef.current < 420) {
-            markRef.current();
-            lastUpTapRef.current = 0;
-            return;
-          }
-          lastUpTapRef.current = now;
+          // Volume up is only fake power in Lock mode. Marks use the tiny corner tap.
           powerRef.current();
           return;
         }
@@ -685,11 +686,8 @@ export default function StageCover() {
 
     try {
       await activateKeepAwakeAsync();
-      previousBrightnessRef.current = await Brightness.getBrightnessAsync();
-      const brightness = settingsRef.current.batterySaver
-        ? Math.min(BRIGHTNESS_VALUE[settingsRef.current.brightness], 0.14)
-        : BRIGHTNESS_VALUE[settingsRef.current.brightness];
-      await Brightness.setBrightnessAsync(brightness);
+      // Keep whatever brightness the phone already has. Only fake-power sets it to 0.
+      previousBrightnessRef.current = await Brightness.getBrightnessAsync().catch(() => null);
       await armRecordingVolumeButtons();
       if (cancelRef.current) {
         setPhase('idle');
@@ -839,7 +837,9 @@ export default function StageCover() {
           <Camera
             style={StyleSheet.absoluteFill}
             device={device}
-            isActive={cameraPermission.hasPermission && (appActive || covering)}
+            isActive={
+              cameraPermission.hasPermission && (covering || appActive || phase !== 'idle')
+            }
             outputs={[videoOutput]}
             constraints={constraints}
             torchMode={torchOn ? 'on' : 'off'}
@@ -893,9 +893,9 @@ export default function StageCover() {
               <View style={styles.tipBox}>
                 <Text style={styles.tipTitle}>Before the show</Text>
                 <Text style={styles.note}>
-                  Accidental Control Center / notification shade can stop the take. On iPhone: Settings
-                  → Accessibility → Guided Access → On. Triple-click side button after Rec, then
-                  ignore side/volume except as this app uses them. Or keep thumb off the top edge.
+                  Opening Control Center should no longer stop the take — recording keeps going under
+                  your cover. Guided Access (Settings → Accessibility) still helps block accidental
+                  app switches during a long play.
                 </Text>
                 <Pressable
                   onPress={() => setSettings((current) => ({ ...current, tipsDismissed: true }))}
@@ -942,9 +942,9 @@ export default function StageCover() {
             <Text style={styles.note}>
               Vol down starts. While recording: vol down stops
               {settings.coverPreset === 'lock'
-                ? '; vol up = power (double vol up = mark)'
+                ? '; vol up = power (black / wake to same screen)'
                 : '; vol up = mark'}
-              . Tiny corner tap also marks.
+              . Corner tap marks. Control Center will not stop the take.
             </Text>
 
             <Text style={styles.label}>Cover</Text>
@@ -1184,16 +1184,10 @@ export default function StageCover() {
               }
             />
 
-            <Text style={styles.label}>Cover brightness</Text>
-            <OptionRow<BrightnessId>
-              options={[
-                { id: 'dim', label: 'Dim' },
-                { id: 'medium', label: 'Med' },
-                { id: 'bright', label: 'Bright' },
-              ]}
-              selected={settings.brightness}
-              onSelect={(brightness) => setSettings((current) => ({ ...current, brightness }))}
-            />
+            <Text style={styles.note}>
+              Cover uses your phone’s current brightness. Volume up (Lock) only dims to black for
+              fake power, then restores that same brightness.
+            </Text>
 
             <Text style={styles.label}>App lock</Text>
             <OptionRow
