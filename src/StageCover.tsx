@@ -12,10 +12,13 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import * as Battery from 'expo-battery';
 import { Asset, requestPermissionsAsync } from 'expo-media-library';
 import * as Brightness from 'expo-brightness';
+import * as FileSystem from 'expo-file-system/legacy';
 import * as ImagePicker from 'expo-image-picker';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
+import * as ScreenOrientation from 'expo-screen-orientation';
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { VolumeManager } from 'react-native-volume-manager';
@@ -30,31 +33,42 @@ import {
   useVideoOutput,
 } from 'react-native-vision-camera';
 import AppLockGate from './components/AppLockGate';
+import CoverSkins from './components/CoverSkins';
 import LockScreenCover, { type LockSurface } from './components/LockScreenCover';
+import RecordingHud from './components/RecordingHud';
 import TextPresetEditor from './components/TextPresetEditor';
 import {
+  applyShowPreset,
   BRIGHTNESS_VALUE,
   type BrightnessId,
   type CoverPreset,
+  coverReady,
   DEFAULT_SETTINGS,
   type FitId,
+  formatBytes,
   type FpsId,
   type LensId,
   loadSettings,
   newTextPreset,
+  type OrientationId,
   persistCoverImage,
   persistHomeShot,
   persistLockWallpaper,
+  persistPlaylistImage,
   type ResolutionId,
   RESOLUTION_SIZE,
   saveSettings,
   type Settings,
+  type ShowPresetId,
+  SKIN_PRESETS,
+  type SplitMinutes,
   type TextPreset,
 } from './settings';
 
 type Phase = 'idle' | 'starting' | 'recording' | 'stopping';
 
 const FPS_OPTIONS: FpsId[] = [24, 30, 60];
+const LOW_STORAGE_BYTES = 2.5 * 1024 * 1024 * 1024;
 
 function errorText(error: unknown): string {
   if (error instanceof Error && error.message) {
@@ -96,21 +110,15 @@ async function saveVideoToPhotos(path: string): Promise<void> {
   await Asset.create(uri);
 }
 
-function coverReady(settings: Settings): boolean {
-  if (settings.coverPreset === 'black') {
-    return true;
+async function saveMarksFile(marks: number[]): Promise<void> {
+  if (marks.length === 0 || !FileSystem.documentDirectory) {
+    return;
   }
-  if (settings.coverPreset === 'image') {
-    return Boolean(settings.coverUri);
-  }
-  if (settings.coverPreset === 'text') {
-    return Boolean(
-      settings.activeTextPresetId &&
-        settings.textPresets.some((item) => item.id === settings.activeTextPresetId),
-    );
-  }
-  return Boolean(
-    settings.lockWallpaperUri && settings.homeShotUri && settings.lockPin.length >= 4,
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const lines = marks.map((sec, index) => `#${index + 1}\t${sec}s`).join('\n');
+  await FileSystem.writeAsStringAsync(
+    `${FileSystem.documentDirectory}stage-marks-${stamp}.txt`,
+    `Stage Cover marks\n${lines}\n`,
   );
 }
 
@@ -131,12 +139,18 @@ export default function StageCover() {
   const [appActive, setAppActive] = useState(true);
   const [appUnlocked, setAppUnlocked] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
-  const [activeFps, setActiveFps] = useState<number | null>(null);
   const [unsavedPath, setUnsavedPath] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [editorOpen, setEditorOpen] = useState(false);
   const [editorDraft, setEditorDraft] = useState<TextPreset | null>(null);
   const [lockSurface, setLockSurface] = useState<LockSurface>('lock');
+  const [elapsedSec, setElapsedSec] = useState(0);
+  const [marks, setMarks] = useState<number[]>([]);
+  const [freeBytes, setFreeBytes] = useState<number | null>(null);
+  const [batteryLevel, setBatteryLevel] = useState<number | null>(null);
+  const [lowPower, setLowPower] = useState(false);
+  const [playlistIndex, setPlaylistIndex] = useState(0);
+  const [markFlash, setMarkFlash] = useState(false);
 
   const phaseRef = useRef<Phase>('idle');
   const settingsRef = useRef(settings);
@@ -145,18 +159,25 @@ export default function StageCover() {
   const lastLitSurfaceRef = useRef<Exclude<LockSurface, 'off'>>('lock');
   const recorderRef = useRef<Recorder | null>(null);
   const cancelRef = useRef(false);
+  const continueSplitRef = useRef(false);
   const releaseVolumeRef = useRef<(() => Promise<void>) | null>(null);
   const previousVolumeRef = useRef<number | null>(null);
   const previousBrightnessRef = useRef<number | null>(null);
   const stopRef = useRef<() => Promise<void>>(async () => {});
   const startRef = useRef<() => Promise<void>>(async () => {});
+  const continueRef = useRef<() => Promise<void>>(async () => {});
   const powerRef = useRef<() => void>(() => {});
+  const markRef = useRef<() => void>(() => {});
   const videoOutputRef = useRef<ReturnType<typeof useVideoOutput> | null>(null);
   const handledRef = useRef(false);
   const stopWatchRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const startedAtRef = useRef(0);
+  const marksRef = useRef<number[]>([]);
+  const lastUpTapRef = useRef(0);
 
   settingsRef.current = settings;
   cameraReadyRef.current = cameraReady;
+  marksRef.current = marks;
 
   const device = useMemo(() => {
     if (settings.lens === 'front') {
@@ -194,10 +215,10 @@ export default function StageCover() {
 
   const covering = phase !== 'idle';
   const torchOn = settings.flash && settings.lens !== 'front' && device?.hasTorch === true;
-  const activeText = settings.textPresets.find((item) => item.id === settings.activeTextPresetId) ?? null;
+  const activeText =
+    settings.textPresets.find((item) => item.id === settings.activeTextPresetId) ?? null;
   const canRecord = coverReady(settings);
   canRecordRef.current = canRecord;
-
   const needsAppLock =
     settingsReady && settings.appLockEnabled && settings.appLockPin.length >= 4 && !appUnlocked;
 
@@ -229,6 +250,19 @@ export default function StageCover() {
   }, [settings, settingsReady]);
 
   useEffect(() => {
+    if (!settingsReady) {
+      return;
+    }
+    const lock =
+      settings.orientationLock === 'portrait'
+        ? ScreenOrientation.OrientationLock.PORTRAIT_UP
+        : settings.orientationLock === 'landscape'
+          ? ScreenOrientation.OrientationLock.LANDSCAPE
+          : ScreenOrientation.OrientationLock.DEFAULT;
+    void ScreenOrientation.lockAsync(lock).catch(() => {});
+  }, [settings.orientationLock, settingsReady]);
+
+  useEffect(() => {
     const subscription = AppState.addEventListener('change', (state) => {
       const active = state === 'active';
       setAppActive(active);
@@ -242,7 +276,51 @@ export default function StageCover() {
     return () => subscription.remove();
   }, []);
 
-  // Idle volume-down starts recording. Recording handler is armed separately.
+  useEffect(() => {
+    let alive = true;
+    async function poll() {
+      try {
+        const free = await FileSystem.getFreeDiskStorageAsync();
+        const level = await Battery.getBatteryLevelAsync();
+        const power = await Battery.isLowPowerModeEnabledAsync();
+        if (!alive) {
+          return;
+        }
+        setFreeBytes(free);
+        setBatteryLevel(level);
+        setLowPower(power);
+      } catch {
+        // Device APIs unavailable in some environments.
+      }
+    }
+    void poll();
+    const timer = setInterval(() => void poll(), 20000);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (phase !== 'recording') {
+      return;
+    }
+    const timer = setInterval(() => {
+      setElapsedSec(Math.max(0, Math.floor((Date.now() - startedAtRef.current) / 1000)));
+    }, 500);
+    return () => clearInterval(timer);
+  }, [phase]);
+
+  useEffect(() => {
+    if (!covering || settings.coverPreset !== 'playlist' || settings.playlistUris.length < 2) {
+      return;
+    }
+    const timer = setInterval(() => {
+      setPlaylistIndex((current) => (current + 1) % settings.playlistUris.length);
+    }, Math.max(10, settings.playlistSeconds) * 1000);
+    return () => clearInterval(timer);
+  }, [covering, settings.coverPreset, settings.playlistSeconds, settings.playlistUris.length]);
+
   useEffect(() => {
     if (covering || needsAppLock || !settingsReady) {
       return;
@@ -282,7 +360,7 @@ export default function StageCover() {
           await VolumeManager.showNativeVolumeUI({ enabled: true }).catch(() => {});
         };
       } catch {
-        // Volume hooks only work in the installed app.
+        // Installed app only.
       }
     })();
 
@@ -305,6 +383,7 @@ export default function StageCover() {
     await deactivateKeepAwake().catch(() => {});
     setLockSurface('lock');
     lastLitSurfaceRef.current = 'lock';
+    setElapsedSec(0);
   }
 
   powerRef.current = () => {
@@ -313,13 +392,26 @@ export default function StageCover() {
     }
     setLockSurface((current) => {
       if (current === 'off') {
-        void Brightness.setBrightnessAsync(BRIGHTNESS_VALUE[settingsRef.current.brightness]);
+        const brightness = settingsRef.current.batterySaver
+          ? Math.min(BRIGHTNESS_VALUE[settingsRef.current.brightness], 0.16)
+          : BRIGHTNESS_VALUE[settingsRef.current.brightness];
+        void Brightness.setBrightnessAsync(brightness);
         return lastLitSurfaceRef.current;
       }
       lastLitSurfaceRef.current = current;
       void Brightness.setBrightnessAsync(0);
       return 'off';
     });
+  };
+
+  markRef.current = () => {
+    if (phaseRef.current !== 'recording') {
+      return;
+    }
+    const sec = Math.max(0, Math.floor((Date.now() - startedAtRef.current) / 1000));
+    setMarks((current) => [...current, sec]);
+    setMarkFlash(true);
+    setTimeout(() => setMarkFlash(false), 500);
   };
 
   async function armRecordingVolumeButtons() {
@@ -338,11 +430,22 @@ export default function StageCover() {
         result.volume < lastVolume - 0.001 || (lastVolume <= 0.02 && result.volume <= 0.02);
       lastVolume = result.volume;
       const lockMode = settingsRef.current.coverPreset === 'lock';
-      if (lockMode && goingUp) {
-        powerRef.current();
+      if (goingUp) {
+        if (lockMode) {
+          const now = Date.now();
+          if (now - lastUpTapRef.current < 420) {
+            markRef.current();
+            lastUpTapRef.current = 0;
+            return;
+          }
+          lastUpTapRef.current = now;
+          powerRef.current();
+          return;
+        }
+        markRef.current();
         return;
       }
-      if (goingDown || !lockMode) {
+      if (goingDown) {
         void stopRef.current();
       }
     });
@@ -376,26 +479,109 @@ export default function StageCover() {
     }
   }
 
-  async function storeFinishedVideo(path: string) {
-    if (handledRef.current) {
-      return;
-    }
-    handledRef.current = true;
-    clearStopWatch();
-    setSaving(true);
+  async function storeFinishedVideo(path: string, keepGoing: boolean) {
     try {
       await saveVideoToPhotos(path);
-      setUnsavedPath(null);
-      setMessage('Saved to Photos.');
+      if (!keepGoing) {
+        setUnsavedPath(null);
+        await saveMarksFile(marksRef.current);
+        setMessage(
+          marksRef.current.length > 0
+            ? `Saved to Photos. ${marksRef.current.length} mark(s) saved in app files.`
+            : 'Saved to Photos.',
+        );
+      }
     } catch (error) {
-      setUnsavedPath(path);
-      setMessage(errorText(error));
-    } finally {
-      setSaving(false);
-      setPhase('idle');
-      await finishCover();
+      if (!keepGoing) {
+        setUnsavedPath(path);
+        setMessage(errorText(error));
+      }
     }
   }
+
+  async function beginRecorder(isContinuation: boolean) {
+    const output = videoOutputRef.current;
+    if (!output) {
+      throw new Error('Camera is not ready.');
+    }
+    const split = settingsRef.current.splitMinutes;
+    const recorder = await output.createRecorder({
+      maxDuration: split > 0 ? split * 60 : undefined,
+    });
+    if (cancelRef.current && !isContinuation) {
+      return;
+    }
+    recorderRef.current = recorder;
+    handledRef.current = false;
+    if (!isContinuation) {
+      startedAtRef.current = Date.now();
+      setElapsedSec(0);
+      setMarks([]);
+      marksRef.current = [];
+    }
+    await recorder.startRecording(
+      (path, reason) => {
+        recorderRef.current = null;
+        const splitContinue =
+          reason === 'max-duration-reached' &&
+          settingsRef.current.splitMinutes > 0 &&
+          !cancelRef.current;
+        continueSplitRef.current = splitContinue;
+        void (async () => {
+          await storeFinishedVideo(path, splitContinue);
+          if (splitContinue) {
+            setMessage(`Auto-split saved. Continuing…`);
+            await continueRef.current();
+            return;
+          }
+          handledRef.current = true;
+          clearStopWatch();
+          setSaving(false);
+          setPhase('idle');
+          await finishCover();
+        })();
+      },
+      (error) => {
+        if (handledRef.current) {
+          return;
+        }
+        handledRef.current = true;
+        clearStopWatch();
+        recorderRef.current = null;
+        setPhase('idle');
+        const text = errorText(error);
+        if (/audio|microphone|mic/i.test(text)) {
+          setSettings((current) => ({ ...current, mic: false }));
+          setMessage('Audio blocked. Sound Off — tap Rec for silent video.');
+        } else {
+          setMessage(text);
+        }
+        void finishCover();
+      },
+    );
+    if (cancelRef.current && !isContinuation) {
+      if (recorder.isRecording) {
+        await recorder.stopRecording();
+      }
+      return;
+    }
+    setPhase('recording');
+  }
+
+  continueRef.current = async () => {
+    if (cancelRef.current) {
+      setPhase('idle');
+      await finishCover();
+      return;
+    }
+    try {
+      await beginRecorder(true);
+    } catch (error) {
+      setPhase('idle');
+      setMessage(errorText(error));
+      await finishCover();
+    }
+  };
 
   stopRef.current = async () => {
     const current = phaseRef.current;
@@ -403,6 +589,7 @@ export default function StageCover() {
       return;
     }
     cancelRef.current = true;
+    continueSplitRef.current = false;
     setPhase('stopping');
     const recorder = recorderRef.current;
     try {
@@ -437,104 +624,86 @@ export default function StageCover() {
       return;
     }
     if (!canRecordRef.current) {
-      setMessage(
-        settingsRef.current.coverPreset === 'lock'
-          ? 'Lock mode needs lock picture, home picture, and a passcode.'
-          : 'Set up a cover preset first.',
-      );
+      setMessage('Set up a cover first.');
       return;
     }
     if (!cameraReadyRef.current || !device) {
-      setMessage('Camera still starting — wait a second.');
+      setMessage('Camera still starting.');
       return;
     }
 
-    // Silent recording when Sound is Off — never ask for mic.
+    try {
+      const free = await FileSystem.getFreeDiskStorageAsync();
+      setFreeBytes(free);
+      if (free < LOW_STORAGE_BYTES) {
+        setMessage(
+          `Low storage (${formatBytes(free)}). Use 1080p/30 or free space before a long take.`,
+        );
+      }
+    } catch {
+      // ignore
+    }
+
+    const level = await Battery.getBatteryLevelAsync().catch(() => -1);
+    const power = await Battery.isLowPowerModeEnabledAsync().catch(() => false);
+    if (level >= 0) {
+      setBatteryLevel(level);
+    }
+    setLowPower(power);
+    if ((level >= 0 && level < 0.2) || power) {
+      setMessage(
+        power
+          ? 'Low Power Mode on — phone may throttle. Plug in if you can.'
+          : `Battery ${Math.round((level as number) * 100)}%. Plug in for a long play.`,
+      );
+    }
+
     if (settingsRef.current.mic && !microphonePermission.hasPermission) {
       if (microphonePermission.canRequestPermission) {
         const granted = await microphonePermission.requestPermission();
         if (!granted) {
           setSettings((current) => ({ ...current, mic: false }));
-          setMessage('Mic denied. Sound turned Off — tap Rec again for a silent video.');
+          setMessage('Mic denied. Sound Off — tap Rec again.');
           return;
         }
       } else {
         setSettings((current) => ({ ...current, mic: false }));
-        setMessage('Mic unavailable. Sound turned Off — tap Rec again for a silent video.');
+        setMessage('Mic blocked. Sound Off — tap Rec again.');
         return;
       }
     }
 
     cancelRef.current = false;
+    continueSplitRef.current = false;
     handledRef.current = false;
     clearStopWatch();
-    setMessage(null);
     setUnsavedPath(null);
     setLockSurface('lock');
     lastLitSurfaceRef.current = 'lock';
+    setPlaylistIndex(0);
     setPhase('starting');
 
     try {
       await activateKeepAwakeAsync();
       previousBrightnessRef.current = await Brightness.getBrightnessAsync();
-      await Brightness.setBrightnessAsync(BRIGHTNESS_VALUE[settingsRef.current.brightness]);
+      const brightness = settingsRef.current.batterySaver
+        ? Math.min(BRIGHTNESS_VALUE[settingsRef.current.brightness], 0.14)
+        : BRIGHTNESS_VALUE[settingsRef.current.brightness];
+      await Brightness.setBrightnessAsync(brightness);
       await armRecordingVolumeButtons();
       if (cancelRef.current) {
         setPhase('idle');
         await finishCover();
         return;
       }
-      const output = videoOutputRef.current;
-      if (!output) {
-        throw new Error('Camera is not ready.');
-      }
-      const recorder = await output.createRecorder({});
-      if (cancelRef.current) {
-        setPhase('idle');
-        await finishCover();
-        return;
-      }
-      recorderRef.current = recorder;
-      await recorder.startRecording(
-        (path) => {
-          recorderRef.current = null;
-          void storeFinishedVideo(path);
-        },
-        (error) => {
-          if (handledRef.current) {
-            return;
-          }
-          handledRef.current = true;
-          clearStopWatch();
-          recorderRef.current = null;
-          setPhase('idle');
-          const text = errorText(error);
-          if (/audio|microphone|mic/i.test(text)) {
-            setSettings((current) => ({ ...current, mic: false }));
-            setMessage('Audio blocked. Sound is now Off — tap Rec for a silent video.');
-          } else {
-            setMessage(text);
-          }
-          void finishCover();
-        },
-      );
-      if (cancelRef.current) {
-        if (recorder.isRecording) {
-          await recorder.stopRecording();
-        } else {
-          setPhase('idle');
-          await finishCover();
-        }
-        return;
-      }
-      setPhase('recording');
+      await beginRecorder(false);
     } catch (error) {
       recorderRef.current = null;
       setPhase('idle');
       const text = errorText(error);
       if (/audio|microphone|mic/i.test(text)) {
         setSettings((current) => ({ ...current, mic: false }));
-        setMessage('Audio blocked. Sound is now Off — tap Rec for a silent video.');
+        setMessage('Audio blocked. Sound Off — tap Rec again.');
       } else {
         setMessage(text);
       }
@@ -578,20 +747,25 @@ export default function StageCover() {
     setSettings((current) => ({ ...current, homeShotUri, coverPreset: 'lock' }));
   }
 
-  async function retrySave() {
-    if (!unsavedPath) {
+  async function addPlaylistImages() {
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ['images'],
+      quality: 0.9,
+      allowsMultipleSelection: true,
+      selectionLimit: 8,
+    });
+    if (result.canceled || result.assets.length === 0) {
       return;
     }
-    setSaving(true);
-    try {
-      await saveVideoToPhotos(unsavedPath);
-      setUnsavedPath(null);
-      setMessage('Saved to Photos.');
-    } catch (error) {
-      setMessage(errorText(error));
-    } finally {
-      setSaving(false);
+    const saved: string[] = [];
+    for (let index = 0; index < result.assets.length; index += 1) {
+      saved.push(await persistPlaylistImage(result.assets[index].uri, index));
     }
+    setSettings((current) => ({
+      ...current,
+      playlistUris: [...current.playlistUris, ...saved].slice(0, 12),
+      coverPreset: 'playlist',
+    }));
   }
 
   async function enableSound(on: boolean) {
@@ -601,27 +775,36 @@ export default function StageCover() {
     }
     if (!microphonePermission.hasPermission) {
       if (!microphonePermission.canRequestPermission) {
-        setMessage('Mic permission is blocked in iPhone Settings.');
-        setSettings((current) => ({ ...current, mic: false }));
+        setMessage('Mic blocked in iPhone Settings.');
         return;
       }
       const granted = await microphonePermission.requestPermission();
       if (!granted) {
-        setMessage('Mic denied — videos will stay silent.');
-        setSettings((current) => ({ ...current, mic: false }));
+        setMessage('Mic denied — staying silent.');
         return;
       }
     }
     setSettings((current) => ({ ...current, mic: true }));
   }
 
+  function useShowPreset(id: ShowPresetId) {
+    setSettings((current) => applyShowPreset(current, id));
+    setMessage(
+      id === 'school'
+        ? 'School Play preset loaded.'
+        : id === 'silent'
+          ? 'Silent Recital preset loaded.'
+          : 'Social @ preset loaded.',
+    );
+  }
+
   if (!cameraPermission.hasPermission) {
     return (
       <SafeAreaView style={styles.permissionScreen}>
         <StatusBar style="light" />
-        <Text style={styles.body}>Allow the camera so the play can be recorded under a cover screen.</Text>
+        <Text style={styles.body}>Allow the camera to record under a cover screen.</Text>
         <Pressable
-          style={styles.quietButton}
+          style={styles.secondaryButton}
           onPress={() => {
             if (cameraPermission.canRequestPermission) {
               void cameraPermission.requestPermission();
@@ -630,7 +813,7 @@ export default function StageCover() {
             }
           }}
         >
-          <Text style={styles.quietButtonLabel}>
+          <Text style={styles.secondaryLabel}>
             {cameraPermission.canRequestPermission ? 'Allow camera' : 'Open Settings'}
           </Text>
         </Pressable>
@@ -638,89 +821,45 @@ export default function StageCover() {
     );
   }
 
+  const playlistUri = settings.playlistUris[playlistIndex] ?? settings.playlistUris[0] ?? null;
+
   return (
     <View style={styles.root}>
       <StatusBar hidden={covering || needsAppLock} style="light" />
 
       {device ? (
-        <Camera
-          style={[StyleSheet.absoluteFill, !settings.showPreview && !covering ? styles.cameraHidden : null]}
-          device={device}
-          isActive={cameraPermission.hasPermission && (appActive || covering)}
-          outputs={[videoOutput]}
-          constraints={constraints}
-          torchMode={torchOn ? 'on' : 'off'}
-          zoom={zoom}
-          enableLowLightBoost={device.supportsLowLightBoost ? settings.lowLight : undefined}
-          resizeMode="cover"
-          onStarted={() => setCameraReady(true)}
-          onStopped={() => setCameraReady(false)}
-          onSessionConfigSelected={(config) => setActiveFps(config.selectedFPS ?? null)}
-          onError={(error) => {
-            if (phaseRef.current === 'idle') {
-              setMessage(errorText(error));
-            }
-          }}
-        />
+        <View
+          style={
+            covering || !settings.showPreview
+              ? styles.hiddenCameraHost
+              : styles.previewWindowAbsolute
+          }
+          pointerEvents="none"
+        >
+          <Camera
+            style={StyleSheet.absoluteFill}
+            device={device}
+            isActive={cameraPermission.hasPermission && (appActive || covering)}
+            outputs={[videoOutput]}
+            constraints={constraints}
+            torchMode={torchOn ? 'on' : 'off'}
+            zoom={zoom}
+            enableLowLightBoost={device.supportsLowLightBoost ? settings.lowLight : undefined}
+            resizeMode="cover"
+            onStarted={() => setCameraReady(true)}
+            onStopped={() => setCameraReady(false)}
+            onError={(error) => {
+              if (phaseRef.current === 'idle') {
+                setMessage(errorText(error));
+              }
+            }}
+          />
+        </View>
       ) : null}
 
-      {!settings.showPreview && !covering ? <View style={styles.previewMask} /> : null}
-
-      {covering ? (
-        <View style={styles.cover} pointerEvents="auto">
-          {settings.coverPreset === 'black' ? <View style={styles.blackCover} /> : null}
-          {settings.coverPreset === 'image' && settings.coverUri ? (
-            <Image
-              source={{ uri: settings.coverUri }}
-              style={styles.coverImage}
-              resizeMode={settings.fit === 'fill' ? 'cover' : 'contain'}
-            />
-          ) : null}
-          {settings.coverPreset === 'text' && activeText ? (
-            <View style={[styles.blackCover, { backgroundColor: activeText.background }]}>
-              {activeText.layers.map((layer) => (
-                <Text
-                  key={layer.id}
-                  style={{
-                    position: 'absolute',
-                    left: layer.x * Dimensions.get('window').width - 90,
-                    top: layer.y * Dimensions.get('window').height - 20,
-                    width: 180,
-                    textAlign: 'center',
-                    color: layer.color,
-                    fontSize: layer.size,
-                    fontWeight: '700',
-                  }}
-                >
-                  {layer.text}
-                </Text>
-              ))}
-            </View>
-          ) : null}
-          {settings.coverPreset === 'lock' ? (
-            <LockScreenCover
-              surface={lockSurface}
-              wallpaperUri={settings.lockWallpaperUri}
-              homeShotUri={settings.homeShotUri}
-              pin={settings.lockPin}
-              onSwipeToPasscode={() => {
-                lastLitSurfaceRef.current = 'passcode';
-                setLockSurface('passcode');
-              }}
-              onUnlock={() => {
-                lastLitSurfaceRef.current = 'home';
-                setLockSurface('home');
-              }}
-              onBackToLock={() => {
-                lastLitSurfaceRef.current = 'lock';
-                setLockSurface('lock');
-              }}
-            />
-          ) : null}
-        </View>
-      ) : (
+      {!covering ? (
         <SafeAreaView style={styles.idleLayer} pointerEvents="box-none">
-          <View style={styles.topBar} pointerEvents="box-none">
+          <View style={styles.topBar}>
             <Pressable
               style={[styles.recChip, (!canRecord || !cameraReady) && styles.recChipDisabled]}
               disabled={!canRecord || !cameraReady}
@@ -739,31 +878,115 @@ export default function StageCover() {
             </Pressable>
           </View>
 
-          <View style={styles.previewSpacer} pointerEvents="none" />
+          <View style={styles.previewWindowSpacer} pointerEvents="none">
+            {!settings.showPreview ? (
+              <View style={styles.previewOff}>
+                <Text style={styles.previewOffLabel}>Preview hidden</Text>
+              </View>
+            ) : (
+              <View style={styles.previewWindowFrame} />
+            )}
+          </View>
 
           <ScrollView style={styles.panel} contentContainerStyle={styles.panelContent} bounces={false}>
+            {!settings.tipsDismissed ? (
+              <View style={styles.tipBox}>
+                <Text style={styles.tipTitle}>Before the show</Text>
+                <Text style={styles.note}>
+                  Accidental Control Center / notification shade can stop the take. On iPhone: Settings
+                  → Accessibility → Guided Access → On. Triple-click side button after Rec, then
+                  ignore side/volume except as this app uses them. Or keep thumb off the top edge.
+                </Text>
+                <Pressable
+                  onPress={() => setSettings((current) => ({ ...current, tipsDismissed: true }))}
+                >
+                  <Text style={styles.tipDismiss}>Got it</Text>
+                </Pressable>
+              </View>
+            ) : null}
+
+            {(freeBytes != null && freeBytes < LOW_STORAGE_BYTES) ||
+            (batteryLevel != null && batteryLevel < 0.2) ||
+            lowPower ? (
+              <Text style={styles.warn}>
+                {freeBytes != null && freeBytes < LOW_STORAGE_BYTES
+                  ? `Low storage: ${formatBytes(freeBytes)}. `
+                  : ''}
+                {batteryLevel != null && batteryLevel < 0.2
+                  ? `Battery ${Math.round(batteryLevel * 100)}%. `
+                  : ''}
+                {lowPower ? 'Low Power Mode on. ' : ''}
+                Prefer 1080p/30 and plug in.
+              </Text>
+            ) : null}
+
+            <Text style={styles.label}>Show presets</Text>
+            <View style={styles.row}>
+              {(
+                [
+                  ['school', 'School Play'],
+                  ['silent', 'Silent'],
+                  ['social', 'Social @'],
+                ] as const
+              ).map(([id, label]) => (
+                <Pressable
+                  key={id}
+                  style={styles.presetChip}
+                  onPress={() => useShowPreset(id)}
+                >
+                  <Text style={styles.presetChipLabel}>{label}</Text>
+                </Pressable>
+              ))}
+            </View>
+
             <Text style={styles.note}>
-              Volume down starts recording. While recording, volume down stops
-              {settings.coverPreset === 'lock' ? '; volume up is power' : ''}.
+              Vol down starts. While recording: vol down stops
+              {settings.coverPreset === 'lock'
+                ? '; vol up = power (double vol up = mark)'
+                : '; vol up = mark'}
+              . Tiny corner tap also marks.
             </Text>
-            {activeFps != null ? <Text style={styles.note}>{activeFps} fps</Text> : null}
 
             <Text style={styles.label}>Cover</Text>
             <OptionRow<CoverPreset>
               options={[
-                { id: 'image', label: 'Image' },
-                { id: 'black', label: 'Black' },
-                { id: 'text', label: 'Text' },
+                { id: 'image', label: 'Img' },
+                { id: 'black', label: 'Blk' },
+                { id: 'text', label: 'Txt' },
                 { id: 'lock', label: 'Lock' },
+                { id: 'playlist', label: 'Play' },
               ]}
-              selected={settings.coverPreset}
+              selected={
+                SKIN_PRESETS.includes(settings.coverPreset)
+                  ? ('none' as CoverPreset)
+                  : settings.coverPreset
+              }
+              onSelect={(coverPreset) => setSettings((current) => ({ ...current, coverPreset }))}
+            />
+
+            <Text style={styles.label}>Cover skins</Text>
+            <OptionRow<CoverPreset>
+              options={[
+                { id: 'messages', label: 'Msgs' },
+                { id: 'notes', label: 'Notes' },
+                { id: 'spotify', label: 'Music' },
+                { id: 'calculator', label: 'Calc' },
+                { id: 'clock', label: 'Clock' },
+              ]}
+              selected={
+                SKIN_PRESETS.includes(settings.coverPreset)
+                  ? settings.coverPreset
+                  : ('none' as CoverPreset)
+              }
               onSelect={(coverPreset) => setSettings((current) => ({ ...current, coverPreset }))}
             />
 
             {settings.coverPreset === 'image' ? (
               <>
                 <Pressable style={styles.secondaryButton} onPress={() => void chooseCover()}>
-                  {settings.coverUri ? <Image source={{ uri: settings.coverUri }} style={styles.thumb} /> : null}
+                  {settings.coverUri ? (
+                    <Image source={{ uri: settings.coverUri }} style={styles.thumb} />
+                  ) : null}
                   <Text style={styles.secondaryLabel}>
                     {settings.coverUri ? 'Change picture' : 'Choose picture'}
                   </Text>
@@ -779,54 +1002,74 @@ export default function StageCover() {
               </>
             ) : null}
 
-            {settings.coverPreset === 'text' ? (
+            {settings.coverPreset === 'playlist' ? (
               <>
-                <Pressable
-                  style={styles.secondaryButton}
-                  onPress={() => {
-                    const draft = activeText ?? newTextPreset(`Text ${settings.textPresets.length + 1}`);
-                    setEditorDraft(draft);
-                    setEditorOpen(true);
-                  }}
-                >
-                  <Text style={styles.secondaryLabel}>{activeText ? 'Edit text' : 'Make text'}</Text>
+                <Text style={styles.note}>
+                  Rotates pictures every {settings.playlistSeconds}s while recording.
+                </Text>
+                <Pressable style={styles.secondaryButton} onPress={() => void addPlaylistImages()}>
+                  <Text style={styles.secondaryLabel}>
+                    Add pictures ({settings.playlistUris.length})
+                  </Text>
                 </Pressable>
-                <Pressable
-                  style={styles.secondaryButton}
-                  onPress={() => {
-                    const draft = newTextPreset(`Text ${settings.textPresets.length + 1}`);
-                    setEditorDraft(draft);
-                    setEditorOpen(true);
-                  }}
-                >
-                  <Text style={styles.secondaryLabel}>New text</Text>
-                </Pressable>
+                <OptionRow<string>
+                  options={[
+                    { id: '30', label: '30s' },
+                    { id: '45', label: '45s' },
+                    { id: '60', label: '60s' },
+                    { id: '90', label: '90s' },
+                  ]}
+                  selected={String(settings.playlistSeconds)}
+                  onSelect={(value) =>
+                    setSettings((current) => ({
+                      ...current,
+                      playlistSeconds: Number(value),
+                    }))
+                  }
+                />
+                {settings.playlistUris.length > 0 ? (
+                  <Pressable
+                    style={styles.secondaryButton}
+                    onPress={() =>
+                      setSettings((current) => ({ ...current, playlistUris: [] }))
+                    }
+                  >
+                    <Text style={styles.secondaryLabel}>Clear playlist</Text>
+                  </Pressable>
+                ) : null}
               </>
+            ) : null}
+
+            {settings.coverPreset === 'text' ? (
+              <Pressable
+                style={styles.secondaryButton}
+                onPress={() => {
+                  const draft =
+                    activeText ?? newTextPreset(`Text ${settings.textPresets.length + 1}`);
+                  setEditorDraft(draft);
+                  setEditorOpen(true);
+                }}
+              >
+                <Text style={styles.secondaryLabel}>
+                  {activeText ? 'Edit text' : 'Make text'}
+                </Text>
+              </Pressable>
             ) : null}
 
             {settings.coverPreset === 'lock' ? (
               <>
-                <Text style={styles.note}>
-                  Required: lock picture, home picture, and passcode. Swipe sideways (or up) on the
-                  lock picture to open passcode, like iPhone.
-                </Text>
                 <Pressable style={styles.secondaryButton} onPress={() => void chooseLockWallpaper()}>
                   {settings.lockWallpaperUri ? (
                     <Image source={{ uri: settings.lockWallpaperUri }} style={styles.thumb} />
                   ) : null}
-                  <Text style={styles.secondaryLabel}>
-                    {settings.lockWallpaperUri ? 'Change lock picture' : 'Lock picture (required)'}
-                  </Text>
+                  <Text style={styles.secondaryLabel}>Lock picture</Text>
                 </Pressable>
                 <Pressable style={styles.secondaryButton} onPress={() => void chooseHomeShot()}>
                   {settings.homeShotUri ? (
                     <Image source={{ uri: settings.homeShotUri }} style={styles.thumb} />
                   ) : null}
-                  <Text style={styles.secondaryLabel}>
-                    {settings.homeShotUri ? 'Change home picture' : 'Home picture (required)'}
-                  </Text>
+                  <Text style={styles.secondaryLabel}>Home picture</Text>
                 </Pressable>
-                <Text style={styles.label}>Fake unlock passcode</Text>
                 <TextInput
                   style={styles.pinInput}
                   value={settings.lockPin}
@@ -839,26 +1082,69 @@ export default function StageCover() {
                   keyboardType="number-pad"
                   secureTextEntry
                   maxLength={6}
-                  placeholder="4–6 digits"
+                  placeholder="Fake passcode"
                   placeholderTextColor="#71717a"
                 />
               </>
             ) : null}
 
+            <Text style={styles.label}>Orientation</Text>
+            <OptionRow<OrientationId>
+              options={[
+                { id: 'portrait', label: 'Portrait' },
+                { id: 'landscape', label: 'Landscape' },
+                { id: 'auto', label: 'Auto' },
+              ]}
+              selected={settings.orientationLock}
+              onSelect={(orientationLock) =>
+                setSettings((current) => ({ ...current, orientationLock }))
+              }
+            />
+
+            <Text style={styles.label}>Auto-split</Text>
+            <OptionRow<string>
+              options={[
+                { id: '0', label: 'Off' },
+                { id: '10', label: '10m' },
+                { id: '15', label: '15m' },
+                { id: '20', label: '20m' },
+                { id: '30', label: '30m' },
+              ]}
+              selected={String(settings.splitMinutes)}
+              onSelect={(value) =>
+                setSettings((current) => ({
+                  ...current,
+                  splitMinutes: Number(value) as SplitMinutes,
+                }))
+              }
+            />
+
+            <Text style={styles.label}>Battery saver</Text>
+            <OptionRow
+              options={[
+                { id: 'on', label: 'On' },
+                { id: 'off', label: 'Off' },
+              ]}
+              selected={settings.batterySaver ? 'on' : 'off'}
+              onSelect={(value) =>
+                setSettings((current) => ({ ...current, batterySaver: value === 'on' }))
+              }
+            />
+
             <Text style={styles.label}>Resolution</Text>
             <OptionRow<ResolutionId>
               options={[
-                { id: '720', label: '720p' },
-                { id: '1080', label: '1080p' },
+                { id: '720', label: '720' },
+                { id: '1080', label: '1080' },
                 { id: '4k', label: '4K' },
               ]}
               selected={settings.resolution}
               onSelect={(resolution) => setSettings((current) => ({ ...current, resolution }))}
             />
 
-            <Text style={styles.label}>Frame rate</Text>
+            <Text style={styles.label}>FPS</Text>
             <OptionRow<string>
-              options={FPS_OPTIONS.map((fps) => ({ id: String(fps), label: `${fps}` }))}
+              options={FPS_OPTIONS.map((fps) => ({ id: String(fps), label: String(fps) }))}
               selected={String(settings.fps)}
               onSelect={(fps) =>
                 setSettings((current) => ({ ...current, fps: Number(fps) as FpsId }))
@@ -876,16 +1162,6 @@ export default function StageCover() {
               onSelect={(lens) => setSettings((current) => ({ ...current, lens }))}
             />
 
-            <Text style={styles.label}>Flash</Text>
-            <OptionRow
-              options={[
-                { id: 'off', label: 'Off' },
-                { id: 'on', label: 'On' },
-              ]}
-              selected={settings.flash ? 'on' : 'off'}
-              onSelect={(value) => setSettings((current) => ({ ...current, flash: value === 'on' }))}
-            />
-
             <Text style={styles.label}>Sound</Text>
             <OptionRow
               options={[
@@ -895,19 +1171,16 @@ export default function StageCover() {
               selected={settings.mic ? 'on' : 'off'}
               onSelect={(value) => void enableSound(value === 'on')}
             />
-            <Text style={styles.note}>
-              Sound Off records a silent video and never asks for the microphone.
-            </Text>
 
-            <Text style={styles.label}>Dark stage</Text>
+            <Text style={styles.label}>Flash</Text>
             <OptionRow
               options={[
-                { id: 'on', label: 'Brighten' },
-                { id: 'off', label: 'Normal' },
+                { id: 'off', label: 'Off' },
+                { id: 'on', label: 'On' },
               ]}
-              selected={settings.lowLight ? 'on' : 'off'}
+              selected={settings.flash ? 'on' : 'off'}
               onSelect={(value) =>
-                setSettings((current) => ({ ...current, lowLight: value === 'on' }))
+                setSettings((current) => ({ ...current, flash: value === 'on' }))
               }
             />
 
@@ -934,35 +1207,119 @@ export default function StageCover() {
               }
             />
             {settings.appLockEnabled ? (
-              <>
-                <Text style={styles.note}>Required every time the app opens.</Text>
-                <TextInput
-                  style={styles.pinInput}
-                  value={settings.appLockPin}
-                  onChangeText={(appLockPin) =>
-                    setSettings((current) => ({
-                      ...current,
-                      appLockPin: appLockPin.replace(/[^0-9]/g, '').slice(0, 6),
-                    }))
-                  }
-                  keyboardType="number-pad"
-                  secureTextEntry
-                  maxLength={6}
-                  placeholder="App passcode"
-                  placeholderTextColor="#71717a"
-                />
-              </>
+              <TextInput
+                style={styles.pinInput}
+                value={settings.appLockPin}
+                onChangeText={(appLockPin) =>
+                  setSettings((current) => ({
+                    ...current,
+                    appLockPin: appLockPin.replace(/[^0-9]/g, '').slice(0, 6),
+                  }))
+                }
+                keyboardType="number-pad"
+                secureTextEntry
+                maxLength={6}
+                placeholder="App passcode"
+                placeholderTextColor="#71717a"
+              />
             ) : null}
 
             {message ? <Text style={styles.message}>{message}</Text> : null}
-            {saving ? <ActivityIndicator color="#ffffff" /> : null}
+            {saving ? <ActivityIndicator color="#fff" /> : null}
             {unsavedPath ? (
-              <Pressable style={styles.secondaryButton} onPress={() => void retrySave()}>
+              <Pressable
+                style={styles.secondaryButton}
+                onPress={() => {
+                  void (async () => {
+                    setSaving(true);
+                    try {
+                      await saveVideoToPhotos(unsavedPath);
+                      setUnsavedPath(null);
+                      setMessage('Saved to Photos.');
+                    } catch (error) {
+                      setMessage(errorText(error));
+                    } finally {
+                      setSaving(false);
+                    }
+                  })();
+                }}
+              >
                 <Text style={styles.secondaryLabel}>Save to Photos</Text>
               </Pressable>
             ) : null}
           </ScrollView>
         </SafeAreaView>
+      ) : (
+        <View style={styles.cover}>
+          {settings.coverPreset === 'black' ? <View style={styles.blackCover} /> : null}
+          {settings.coverPreset === 'image' && settings.coverUri ? (
+            <Image
+              source={{ uri: settings.coverUri }}
+              style={styles.coverImage}
+              resizeMode={settings.fit === 'fill' ? 'cover' : 'contain'}
+            />
+          ) : null}
+          {settings.coverPreset === 'playlist' && playlistUri ? (
+            <Image source={{ uri: playlistUri }} style={styles.coverImage} resizeMode="cover" />
+          ) : null}
+          {settings.coverPreset === 'text' && activeText ? (
+            <View style={[styles.blackCover, { backgroundColor: activeText.background }]}>
+              {activeText.layers.map((layer) => (
+                <Text
+                  key={layer.id}
+                  style={{
+                    position: 'absolute',
+                    left: layer.x * Dimensions.get('window').width - 90,
+                    top: layer.y * Dimensions.get('window').height - 20,
+                    width: 180,
+                    textAlign: 'center',
+                    color: layer.color,
+                    fontSize: layer.size,
+                    fontWeight: '700',
+                  }}
+                >
+                  {layer.text}
+                </Text>
+              ))}
+            </View>
+          ) : null}
+          {SKIN_PRESETS.includes(settings.coverPreset) ? (
+            <CoverSkins
+              kind={settings.coverPreset as 'messages' | 'notes' | 'spotify' | 'calculator' | 'clock'}
+            />
+          ) : null}
+          {settings.coverPreset === 'lock' ? (
+            <LockScreenCover
+              surface={lockSurface}
+              wallpaperUri={settings.lockWallpaperUri}
+              homeShotUri={settings.homeShotUri}
+              pin={settings.lockPin}
+              onSwipeToPasscode={() => {
+                lastLitSurfaceRef.current = 'passcode';
+                setLockSurface('passcode');
+              }}
+              onUnlock={() => {
+                lastLitSurfaceRef.current = 'home';
+                setLockSurface('home');
+              }}
+              onBackToLock={() => {
+                lastLitSurfaceRef.current = 'lock';
+                setLockSurface('lock');
+              }}
+            />
+          ) : null}
+
+          {phase === 'recording' ? (
+            <RecordingHud
+              elapsedSec={elapsedSec}
+              freeBytes={freeBytes}
+              marks={marks}
+              batterySaver={settings.batterySaver}
+              onMark={() => markRef.current()}
+            />
+          ) : null}
+          {markFlash ? <View style={styles.markFlash} pointerEvents="none" /> : null}
+        </View>
       )}
 
       {needsAppLock ? (
@@ -1026,10 +1383,7 @@ function OptionRow<T extends string>({
 }
 
 const styles = StyleSheet.create({
-  root: {
-    flex: 1,
-    backgroundColor: '#000',
-  },
+  root: { flex: 1, backgroundColor: '#0a0a0b' },
   permissionScreen: {
     flex: 1,
     backgroundColor: '#111',
@@ -1037,123 +1391,131 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     gap: 16,
   },
-  cameraHidden: {
-    opacity: 0,
-  },
-  previewMask: {
-    ...StyleSheet.absoluteFill,
-    backgroundColor: '#09090b',
-  },
-  idleLayer: {
-    flex: 1,
-  },
+  idleLayer: { flex: 1 },
   topBar: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'center',
     paddingHorizontal: 14,
     paddingTop: 4,
+    marginBottom: 8,
   },
   recChip: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
-    backgroundColor: 'rgba(28,28,30,0.72)',
+    backgroundColor: 'rgba(28,28,30,0.85)',
     borderRadius: 14,
     paddingHorizontal: 10,
     paddingVertical: 7,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: 'rgba(255,255,255,0.18)',
+    borderColor: 'rgba(255,255,255,0.16)',
   },
-  recChipDisabled: {
-    opacity: 0.45,
-  },
-  recDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: '#a1a1aa',
-  },
-  recChipLabel: {
-    color: '#e4e4e7',
-    fontSize: 13,
-    fontWeight: '600',
-  },
+  recChipDisabled: { opacity: 0.45 },
+  recDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: '#a1a1aa' },
+  recChipLabel: { color: '#e4e4e7', fontSize: 13, fontWeight: '600' },
   eyeHit: {
-    backgroundColor: 'rgba(28,28,30,0.72)',
+    backgroundColor: 'rgba(28,28,30,0.85)',
     borderRadius: 14,
     paddingHorizontal: 12,
     paddingVertical: 7,
   },
-  eyeLabel: {
-    color: '#e4e4e7',
-    fontSize: 13,
-    fontWeight: '600',
+  eyeLabel: { color: '#e4e4e7', fontSize: 13, fontWeight: '600' },
+  previewWindowAbsolute: {
+    position: 'absolute',
+    top: 92,
+    alignSelf: 'center',
+    width: '72%',
+    aspectRatio: 3 / 4,
+    maxHeight: 240,
+    borderRadius: 16,
+    overflow: 'hidden',
+    zIndex: 1,
   },
-  previewSpacer: {
+  previewWindowSpacer: {
+    alignSelf: 'center',
+    width: '72%',
+    aspectRatio: 3 / 4,
+    maxHeight: 240,
+    borderRadius: 16,
+    overflow: 'hidden',
+    backgroundColor: '#111',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.12)',
+  },
+  previewWindowFrame: { flex: 1 },
+  previewOff: {
     flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#111',
   },
-  panel: {
-    maxHeight: '48%',
-    backgroundColor: 'rgba(12,12,14,0.96)',
-    borderTopLeftRadius: 18,
-    borderTopRightRadius: 18,
+  previewOffLabel: { color: '#71717a', fontSize: 13 },
+  hiddenCameraHost: {
+    position: 'absolute',
+    width: 1,
+    height: 1,
+    opacity: 0,
+    left: 0,
+    top: 0,
+    overflow: 'hidden',
   },
+  panel: { flex: 1, marginTop: 10 },
   panelContent: {
-    paddingHorizontal: 16,
-    paddingTop: 14,
-    paddingBottom: 30,
+    paddingHorizontal: 14,
+    paddingBottom: 28,
     gap: 8,
   },
-  body: {
-    color: '#d4d4d8',
-    fontSize: 15,
-    lineHeight: 21,
-  },
-  label: {
-    color: '#fff',
-    fontSize: 14,
-    fontWeight: '600',
-    marginTop: 6,
-  },
-  note: {
-    color: '#a1a1aa',
+  body: { color: '#d4d4d8', fontSize: 15, lineHeight: 21 },
+  label: { color: '#fff', fontSize: 13, fontWeight: '600', marginTop: 4 },
+  note: { color: '#a1a1aa', fontSize: 12, lineHeight: 17 },
+  warn: {
+    color: '#fbbf24',
+    backgroundColor: 'rgba(120,53,15,0.35)',
+    borderRadius: 10,
+    padding: 10,
     fontSize: 12,
     lineHeight: 17,
   },
+  tipBox: {
+    backgroundColor: '#18181b',
+    borderRadius: 12,
+    padding: 12,
+    gap: 8,
+  },
+  tipTitle: { color: '#fff', fontWeight: '700', fontSize: 14 },
+  tipDismiss: { color: '#60a5fa', fontWeight: '600', marginTop: 2 },
   message: {
     color: '#fff',
     backgroundColor: '#27272a',
     borderRadius: 10,
     padding: 10,
-    fontSize: 14,
+    fontSize: 13,
   },
-  row: {
-    flexDirection: 'row',
-    gap: 8,
-  },
+  row: { flexDirection: 'row', gap: 8 },
   chip: {
     flex: 1,
-    minHeight: 40,
+    minHeight: 38,
     borderRadius: 10,
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: '#2a2a2e',
     paddingHorizontal: 4,
   },
-  chipActive: {
-    backgroundColor: '#e4e4e7',
+  chipActive: { backgroundColor: '#e4e4e7' },
+  chipLabel: { color: '#f4f4f5', fontSize: 12, fontWeight: '600' },
+  chipLabelActive: { color: '#111' },
+  presetChip: {
+    flex: 1,
+    minHeight: 40,
+    borderRadius: 10,
+    backgroundColor: '#1f2937',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 6,
   },
-  chipLabel: {
-    color: '#f4f4f5',
-    fontSize: 13,
-    fontWeight: '600',
-  },
-  chipLabelActive: {
-    color: '#111',
-  },
+  presetChipLabel: { color: '#e5e7eb', fontSize: 12, fontWeight: '700' },
   secondaryButton: {
-    minHeight: 48,
+    minHeight: 44,
     borderRadius: 12,
     backgroundColor: '#2a2a2e',
     alignItems: 'center',
@@ -1162,28 +1524,8 @@ const styles = StyleSheet.create({
     gap: 10,
     paddingHorizontal: 12,
   },
-  secondaryLabel: {
-    color: '#fff',
-    fontSize: 15,
-    fontWeight: '600',
-  },
-  quietButton: {
-    minHeight: 48,
-    borderRadius: 12,
-    backgroundColor: '#2a2a2e',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  quietButtonLabel: {
-    color: '#fff',
-    fontWeight: '600',
-  },
-  thumb: {
-    width: 36,
-    height: 36,
-    borderRadius: 7,
-    backgroundColor: '#000',
-  },
+  secondaryLabel: { color: '#fff', fontSize: 14, fontWeight: '600' },
+  thumb: { width: 34, height: 34, borderRadius: 7, backgroundColor: '#000' },
   pinInput: {
     borderRadius: 10,
     backgroundColor: '#1c1c1e',
@@ -1194,18 +1536,11 @@ const styles = StyleSheet.create({
     letterSpacing: 4,
     textAlign: 'center',
   },
-  cover: {
+  cover: { ...StyleSheet.absoluteFill, backgroundColor: '#000', zIndex: 30 },
+  coverImage: { width: '100%', height: '100%', backgroundColor: '#000' },
+  blackCover: { ...StyleSheet.absoluteFill, backgroundColor: '#000' },
+  markFlash: {
     ...StyleSheet.absoluteFill,
-    backgroundColor: '#000',
-    zIndex: 30,
-  },
-  coverImage: {
-    width: '100%',
-    height: '100%',
-    backgroundColor: '#000',
-  },
-  blackCover: {
-    ...StyleSheet.absoluteFill,
-    backgroundColor: '#000',
+    backgroundColor: 'rgba(255,255,255,0.04)',
   },
 });

@@ -2,7 +2,7 @@
   "expo": {
     "name": "Stage Cover",
     "slug": "stage-cover",
-    "version": "1.0.0",
+    "version": "1.3.0",
     "orientation": "default",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
@@ -48,7 +48,14 @@
           "granularPermissions": ["video"]
         }
       ],
-      "expo-brightness"
+      "expo-brightness",
+      "expo-battery",
+      [
+        "expo-screen-orientation",
+        {
+          "startOrientation": "DEFAULT"
+        }
+      ]
     ]
   }
 }

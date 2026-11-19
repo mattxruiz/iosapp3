@@ -7,6 +7,9 @@ jobs:
   ipa:
     runs-on: macos-latest
     timeout-minutes: 90
+    env:
+      # Bump this if a warm cache ever looks broken.
+      CACHE_EPOCH: v2
     steps:
       - name: Check out the app
         uses: actions/checkout@v4
@@ -20,11 +23,30 @@ jobs:
       - name: Install JavaScript packages
         run: npm ci
 
+      # Same key for ios/ and DerivedData on purpose. Restoring one without the
+      # other is often slower than a cold build.
+      - name: Restore iOS + DerivedData cache
+        id: ios-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ios
+            .cache/DerivedData
+            ~/Library/Caches/CocoaPods
+          key: ${{ env.CACHE_EPOCH }}-${{ runner.os }}-ios-${{ hashFiles('package-lock.json', 'package.json', 'app.json', 'eas.json') }}
+
       - name: Create the iOS project
+        if: steps.ios-cache.outputs.cache-hit != 'true'
         run: npx expo prebuild --platform ios --no-install
 
       - name: Install CocoaPods
+        if: steps.ios-cache.outputs.cache-hit != 'true'
         run: pod install
+        working-directory: ios
+
+      - name: Refresh pods when cache hit
+        if: steps.ios-cache.outputs.cache-hit == 'true'
+        run: pod install --deployment || pod install
         working-directory: ios
 
       - name: Turn off code signing so Sideloadly can sign it
@@ -49,7 +71,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Prefer the CocoaPods workspace at ios/*.xcworkspace, not the nested project.xcworkspace.
           WORKSPACE=$(ls -d ios/*.xcworkspace 2>/dev/null | head -n 1 || true)
           if [ -z "${WORKSPACE}" ]; then
             WORKSPACE=$(find ios -name "*.xcworkspace" -not -path "*/project.xcworkspace" | head -n 1)
@@ -60,29 +81,27 @@ jobs:
           fi
           echo "Using workspace: ${WORKSPACE}"
 
-          xcodebuild -workspace "${WORKSPACE}" -list
-
-          # Prefer the app scheme (StageCover). Do not take the first listed scheme —
-          # CocoaPods also lists library schemes like "boost".
           SCHEMES=$(
             xcodebuild -workspace "${WORKSPACE}" -list \
               | awk '/Schemes:/{flag=1; next} /^$/{flag=0} flag{gsub(/^[ \t]+|[ \t]+$/,""); if (NF) print}'
           )
-          echo "Available schemes:"
-          echo "${SCHEMES}"
-
           SCHEME=$(echo "${SCHEMES}" | awk '/^StageCover$/{print; found=1; exit} END{if(!found) exit 1}') \
             || SCHEME=$(echo "${SCHEMES}" | head -n 1)
-
           if [ -z "${SCHEME}" ] || [ "${SCHEME}" = "boost" ]; then
             echo "Could not find the StageCover app scheme."
             exit 1
           fi
           echo "Using scheme: [${SCHEME}]"
 
-          DERIVED="${RUNNER_TEMP}/DerivedData"
+          mkdir -p .cache/DerivedData
+          DERIVED="${GITHUB_WORKSPACE}/.cache/DerivedData"
           ARCHIVE="${RUNNER_TEMP}/StageCover.xcarchive"
+          JOBS="$(sysctl -n hw.ncpu)"
 
+          # Faster device Release build for sideload:
+          # - arm64 only (iPhone 14)
+          # - no compiler index store
+          # - no dSYM packaging
           xcodebuild \
             -workspace "${WORKSPACE}" \
             -scheme "${SCHEME}" \
@@ -91,24 +110,30 @@ jobs:
             -destination "generic/platform=iOS" \
             -derivedDataPath "${DERIVED}" \
             -archivePath "${ARCHIVE}" \
+            -jobs "${JOBS}" \
+            -parallelizeTargets \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             DEVELOPMENT_TEAM="" \
             AD_HOC_CODE_SIGNING_ALLOWED=YES \
+            ONLY_ACTIVE_ARCH=YES \
+            ARCHS=arm64 \
+            VALID_ARCHS=arm64 \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            DEBUG_INFORMATION_FORMAT=dwarf \
+            GCC_WARN_INHIBIT_ALL_WARNINGS=YES \
+            SWIFT_SUPPRESS_WARNINGS=YES \
             archive
-
-          echo "Archive tree:"
-          find "${ARCHIVE}" -maxdepth 4 -print || true
 
           APP=$(find "${ARCHIVE}" -name "*.app" -type d | head -n 1 || true)
           if [ -z "${APP}" ]; then
-            echo "Archive had no .app. Falling back to DerivedData Release build product."
             APP=$(find "${DERIVED}/Build/Products" -path "*/Release-iphoneos/*.app" -type d | head -n 1 || true)
           fi
           if [ -z "${APP}" ]; then
             echo "No .app found after archive."
-            find "${DERIVED}/Build/Products" -maxdepth 4 -print || true
+            find "${ARCHIVE}" -maxdepth 5 -print || true
+            find "${DERIVED}/Build/Products" -maxdepth 5 -print || true
             exit 1
           fi
           echo "Using app: ${APP}"
@@ -126,3 +151,4 @@ jobs:
           name: StageCover-unsigned-ipa
           path: StageCover-unsigned.ipa
           if-no-files-found: error
+          retention-days: 7
