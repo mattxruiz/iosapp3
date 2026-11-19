@@ -48,27 +48,56 @@ jobs:
       - name: Compile an unsigned iPhone app
         run: |
           set -euo pipefail
-          WORKSPACE=$(find ios -maxdepth 2 -name "*.xcworkspace" | head -n 1)
-          SCHEME=$(xcodebuild -workspace "$WORKSPACE" -list | awk '/Schemes:/{flag=1; next} flag && NF{print; exit}')
-          ARCHIVE="$RUNNER_TEMP/StageCover.xcarchive"
+
+          # Prefer the CocoaPods workspace at ios/*.xcworkspace, not the nested project.xcworkspace.
+          WORKSPACE=$(ls -d ios/*.xcworkspace 2>/dev/null | head -n 1 || true)
+          if [ -z "${WORKSPACE}" ]; then
+            WORKSPACE=$(find ios -name "*.xcworkspace" -not -path "*/project.xcworkspace" | head -n 1)
+          fi
+          if [ -z "${WORKSPACE}" ]; then
+            echo "No iOS workspace found after prebuild."
+            exit 1
+          fi
+          echo "Using workspace: ${WORKSPACE}"
+
+          xcodebuild -workspace "${WORKSPACE}" -list
+
+          # Trim the leading spaces Xcode prints before scheme names.
+          SCHEME=$(
+            xcodebuild -workspace "${WORKSPACE}" -list \
+              | awk '/Schemes:/{flag=1; next} flag && NF{gsub(/^[ \t]+|[ \t]+$/,""); print; exit}'
+          )
+          if [ -z "${SCHEME}" ]; then
+            echo "No scheme found in ${WORKSPACE}."
+            exit 1
+          fi
+          echo "Using scheme: [${SCHEME}]"
+
+          ARCHIVE="${RUNNER_TEMP}/StageCover.xcarchive"
           xcodebuild \
-            -workspace "$WORKSPACE" \
-            -scheme "$SCHEME" \
+            -workspace "${WORKSPACE}" \
+            -scheme "${SCHEME}" \
             -configuration Release \
             -sdk iphoneos \
             -destination "generic/platform=iOS" \
-            -archivePath "$ARCHIVE" \
+            -archivePath "${ARCHIVE}" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             DEVELOPMENT_TEAM="" \
             archive
-          APP=$(find "$ARCHIVE/Products/Applications" -maxdepth 1 -name "*.app" | head -n 1)
-          rm -rf "$RUNNER_TEMP/Payload"
-          mkdir -p "$RUNNER_TEMP/Payload"
-          cp -R "$APP" "$RUNNER_TEMP/Payload/"
-          cd "$RUNNER_TEMP"
-          zip -r -y "$GITHUB_WORKSPACE/StageCover-unsigned.ipa" Payload
+
+          APP=$(find "${ARCHIVE}/Products/Applications" -maxdepth 1 -name "*.app" | head -n 1)
+          if [ -z "${APP}" ]; then
+            echo "Archive finished, but no .app was produced."
+            exit 1
+          fi
+
+          rm -rf "${RUNNER_TEMP}/Payload"
+          mkdir -p "${RUNNER_TEMP}/Payload"
+          cp -R "${APP}" "${RUNNER_TEMP}/Payload/"
+          cd "${RUNNER_TEMP}"
+          zip -r -y "${GITHUB_WORKSPACE}/StageCover-unsigned.ipa" Payload
 
       - name: Upload the IPA
         uses: actions/upload-artifact@v4
