@@ -76,7 +76,7 @@ export default function AccountSidebar({ open, onClose }: Props) {
               void flushUploads();
             }}
           >
-            <Text style={styles.secondaryLabel}>Refresh quota / retry uploads</Text>
+            <Text style={styles.secondaryLabel}>Refresh quota</Text>
           </Pressable>
 
           {user ? (

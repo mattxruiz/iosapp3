@@ -38,6 +38,7 @@ import AccountSidebar from './components/AccountSidebar';
 import AppLockGate from './components/AppLockGate';
 import CoverSkins from './components/CoverSkins';
 import LockScreenCover, { type LockSurface } from './components/LockScreenCover';
+import RecUploadRing from './components/RecUploadRing';
 import RecordingHud from './components/RecordingHud';
 import TextPresetEditor from './components/TextPresetEditor';
 import {
@@ -140,6 +141,7 @@ export default function StageCover() {
     queueRecordingUpload,
     flushUploads,
     refreshQuota,
+    driveRing,
   } = useAuth();
 
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
@@ -284,6 +286,7 @@ export default function StageCover() {
       // Only treat true background (left the app) as leave-app.
       if (state === 'active') {
         setAppActive(true);
+        void flushUploads();
         return;
       }
       if (state === 'inactive') {
@@ -531,8 +534,8 @@ export default function StageCover() {
         await saveMarksFile(marksRef.current);
         setMessage(
           marksRef.current.length > 0
-            ? `Saved to Photos. ${marksRef.current.length} mark(s). Drive upload queued (Wi‑Fi).`
-            : 'Saved to Photos. Drive upload queued (Wi‑Fi).',
+            ? `Saved to Photos. ${marksRef.current.length} mark(s) saved in app files.`
+            : 'Saved to Photos.',
         );
       }
     } catch (error) {
@@ -935,14 +938,13 @@ export default function StageCover() {
                 </View>
               )}
             </Pressable>
-            <Pressable
-              style={[styles.recChip, (!canRecord || !cameraReady) && styles.recChipDisabled]}
+            <RecUploadRing
+              status={driveRing.status}
+              progress={driveRing.progress}
               disabled={!canRecord || !cameraReady}
+              label={cameraReady ? 'Rec' : '…'}
               onPress={() => void startRef.current()}
-            >
-              <View style={styles.recDot} />
-              <Text style={styles.recChipLabel}>{cameraReady ? 'Rec' : '…'}</Text>
-            </Pressable>
+            />
             <Pressable
               style={styles.eyeHit}
               onPress={() =>

@@ -24,6 +24,7 @@
     "react-native-nitro-image": "^0.15.2",
     "react-native-nitro-modules": "^0.37.2",
     "react-native-safe-area-context": "~5.11.1",
+    "react-native-svg": "15.16.0",
     "react-native-vision-camera": "^5.2.4",
     "react-native-volume-manager": "^2.2.0"
   },

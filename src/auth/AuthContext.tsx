@@ -21,7 +21,13 @@ import {
   GOOGLE_IOS_URL_SCHEME,
   GOOGLE_WEB_CLIENT_ID,
 } from '../config';
-import { enqueueDriveUpload, processDriveUploadQueue } from '../driveUpload';
+import {
+  enqueueDriveUpload,
+  hydrateDriveRing,
+  processDriveUploadQueue,
+  subscribeDriveRing,
+  type DriveRingState,
+} from '../driveUpload';
 import { auth } from '../firebase';
 import { clearGoogleTokens, GOOGLE_AUTH_SCOPES, saveGoogleTokens } from '../googleTokens';
 import {
@@ -41,6 +47,7 @@ type AuthContextValue = {
   authError: string | null;
   quota: QuotaState | null;
   quotaLabel: string;
+  driveRing: DriveRingState;
   signInWithGoogle: () => Promise<void>;
   signOut: () => Promise<void>;
   refreshQuota: () => Promise<QuotaState | null>;
@@ -58,6 +65,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [signingIn, setSigningIn] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const [quota, setQuota] = useState<QuotaState | null>(null);
+  const [driveRing, setDriveRing] = useState<DriveRingState>({
+    status: 'idle',
+    progress: 0,
+  });
+
+  useEffect(() => {
+    void hydrateDriveRing();
+    return subscribeDriveRing(setDriveRing);
+  }, []);
 
   const [request, response, promptAsync] = Google.useAuthRequest({
     iosClientId: GOOGLE_IOS_CLIENT_ID,
@@ -93,6 +109,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           .catch(() => {
             void refreshQuota();
           });
+        // Resume any unfinished Drive uploads from a previous session.
+        void processDriveUploadQueue();
       } else {
         setQuota(null);
       }
@@ -201,6 +219,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       authError,
       quota,
       quotaLabel: formatSecondsLeft(quota?.secondsLeft ?? 0),
+      driveRing,
       signInWithGoogle,
       signOut,
       refreshQuota,
@@ -215,6 +234,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       signingIn,
       authError,
       quota,
+      driveRing,
       signInWithGoogle,
       signOut,
       refreshQuota,
