@@ -1,10 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef } from 'react';
 import { Animated, Easing, Pressable, StyleSheet, Text, View } from 'react-native';
-import Svg, { Rect } from 'react-native-svg';
 import type { DriveRingStatus } from '../driveUpload';
-
-const STROKE = 2.5;
-const PAD = 3;
 
 type Props = {
   status: DriveRingStatus;
@@ -14,58 +10,61 @@ type Props = {
   onPress: () => void;
 };
 
-export default function RecUploadRing({ status, progress, disabled, label, onPress }: Props) {
-  const spin = useRef(new Animated.Value(0)).current;
-  const [size, setSize] = useState({ w: 72, h: 34 });
+/** Soft edge glow only — no spin. Uploading stays faint; done states vanish quickly. */
+export default function RecUploadRing({ status, disabled, label, onPress }: Props) {
+  const glow = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
-    if (status !== 'uploading') {
-      spin.stopAnimation();
-      spin.setValue(0);
+    glow.stopAnimation();
+
+    if (status === 'idle') {
+      glow.setValue(0);
       return;
     }
-    const loop = Animated.loop(
-      Animated.timing(spin, {
-        toValue: 1,
-        duration: 1200,
-        easing: Easing.linear,
-        useNativeDriver: true,
-      }),
-    );
-    loop.start();
-    return () => loop.stop();
-  }, [status, spin]);
 
-  const color =
+    if (status === 'uploading') {
+      glow.setValue(0.22);
+      const loop = Animated.loop(
+        Animated.sequence([
+          Animated.timing(glow, {
+            toValue: 0.38,
+            duration: 1100,
+            easing: Easing.inOut(Easing.sin),
+            useNativeDriver: true,
+          }),
+          Animated.timing(glow, {
+            toValue: 0.16,
+            duration: 1100,
+            easing: Easing.inOut(Easing.sin),
+            useNativeDriver: true,
+          }),
+        ]),
+      );
+      loop.start();
+      return () => loop.stop();
+    }
+
+    // success / error — short tint, then gone
+    glow.setValue(0.45);
+    const fade = Animated.timing(glow, {
+      toValue: 0,
+      duration: 520,
+      delay: 280,
+      easing: Easing.out(Easing.quad),
+      useNativeDriver: true,
+    });
+    fade.start();
+    return () => fade.stop();
+  }, [status, glow]);
+
+  const borderColor =
     status === 'uploading'
-      ? '#eab308'
+      ? 'rgba(250,250,250,0.35)'
       : status === 'success'
-        ? '#22c55e'
+        ? 'rgba(74,222,128,0.4)'
         : status === 'error'
-          ? '#ef4444'
+          ? 'rgba(248,113,113,0.4)'
           : 'transparent';
-
-  const showRing = status === 'uploading' || status === 'success' || status === 'error';
-  const svgW = size.w + PAD * 2;
-  const svgH = size.h + PAD * 2;
-  const radius = svgH / 2;
-  const perimeter = useMemo(() => {
-    const straight = Math.max(0, svgW - svgH) * 2;
-    const caps = Math.PI * svgH;
-    return straight + caps;
-  }, [svgW, svgH]);
-
-  const clamped =
-    status === 'success' || status === 'error'
-      ? 1
-      : Math.max(0.06, Math.min(1, progress > 0 ? progress : 0.1));
-  const dash = perimeter * clamped;
-  const gap = Math.max(0, perimeter - dash);
-
-  const rotate = spin.interpolate({
-    inputRange: [0, 1],
-    outputRange: ['0deg', '360deg'],
-  });
 
   return (
     <Pressable
@@ -73,46 +72,11 @@ export default function RecUploadRing({ status, progress, disabled, label, onPre
       disabled={disabled}
       onPress={onPress}
     >
-      {showRing ? (
-        <Animated.View
-          pointerEvents="none"
-          style={[
-            styles.ringAbs,
-            {
-              width: svgW,
-              height: svgH,
-              marginLeft: -PAD,
-              marginTop: -PAD,
-            },
-            status === 'uploading' ? { transform: [{ rotate }] } : null,
-          ]}
-        >
-          <Svg width={svgW} height={svgH}>
-            <Rect
-              x={STROKE / 2}
-              y={STROKE / 2}
-              width={svgW - STROKE}
-              height={svgH - STROKE}
-              rx={radius - STROKE / 2}
-              ry={radius - STROKE / 2}
-              stroke={color}
-              strokeWidth={STROKE}
-              fill="none"
-              strokeDasharray={`${dash} ${gap}`}
-              strokeLinecap="round"
-            />
-          </Svg>
-        </Animated.View>
-      ) : null}
-      <View
-        style={styles.chip}
-        onLayout={(e) => {
-          const { width, height } = e.nativeEvent.layout;
-          if (width > 0 && height > 0 && (width !== size.w || height !== size.h)) {
-            setSize({ w: width, h: height });
-          }
-        }}
-      >
+      <Animated.View
+        pointerEvents="none"
+        style={[styles.outline, { borderColor, opacity: glow }]}
+      />
+      <View style={styles.chip}>
         <View style={styles.dot} />
         <Text style={styles.label}>{label}</Text>
       </View>
@@ -127,10 +91,11 @@ const styles = StyleSheet.create({
     position: 'relative',
   },
   disabled: { opacity: 0.45 },
-  ringAbs: {
-    position: 'absolute',
-    left: 0,
-    top: 0,
+  outline: {
+    ...StyleSheet.absoluteFill,
+    borderRadius: 16,
+    borderWidth: 1,
+    margin: -1.5,
   },
   chip: {
     flexDirection: 'row',

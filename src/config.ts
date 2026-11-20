@@ -21,8 +21,19 @@ export const GOOGLE_IOS_URL_SCHEME =
 
 export const MODERATOR_GMAIL = 'matthewxruiz@gmail.com';
 
-export const DAILY_QUOTA_SECONDS = 60 * 60;
+/** Free rolling window: 30 minutes every 24 hours. */
+export const DAILY_QUOTA_SECONDS = 30 * 60;
 export const QUOTA_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/** Lifetime unlimited unlock price (App Store IAP plugs in later). */
+export const UNLIMITED_PRICE_LABEL = '$1.99';
+export const UNLIMITED_PRODUCT_ID = 'blacrec_unlimited_lifetime';
+
+/**
+ * Contact / support link shown in Account → Contact support.
+ * Replace when you have the final URL — copyable in the popup.
+ */
+export const SUPPORT_CONTACT_LINK = 'https://support.link.pending';
 
 export const DRIVE_FOLDER_NAME = 'BlacRec Recordings';
 export const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';

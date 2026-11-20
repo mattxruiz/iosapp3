@@ -2,12 +2,14 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Dimensions,
   FlatList,
   Modal,
+  PanResponder,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
-  TextInput,
   View,
 } from 'react-native';
 import { useEvent } from 'expo';
@@ -79,7 +81,7 @@ export default function RecordingsLibrary({ visible, onClose }: Props) {
                 keyExtractor={(item) => item.id}
                 contentContainerStyle={styles.list}
                 ListEmptyComponent={
-                  <Text style={styles.empty}>No in-app recordings yet. Rec takes land here.</Text>
+                  <Text style={styles.empty}>No recordings yet.</Text>
                 }
                 renderItem={({ item }) => (
                   <Pressable style={styles.row} onPress={() => setActive(item)}>
@@ -87,7 +89,6 @@ export default function RecordingsLibrary({ visible, onClose }: Props) {
                       <Text style={styles.rowTitle}>{formatRecordingStamp(item.createdAt)}</Text>
                       <Text style={styles.rowMeta}>
                         {formatTimer(item.durationSec)} · {item.markers.length} markers
-                        {item.photosAssetId ? ' · in Photos' : ''}
                       </Text>
                     </View>
                     <Text style={styles.chev}>›</Text>
@@ -113,7 +114,7 @@ function RecordingPlayer({
   const [fromId, setFromId] = useState('begin');
   const [toId, setToId] = useState('end');
   const [busy, setBusy] = useState(false);
-  const [labelDraft, setLabelDraft] = useState('');
+  const [expanded, setExpanded] = useState(false);
 
   const uri = draft.localPath.startsWith('file://')
     ? draft.localPath
@@ -132,6 +133,21 @@ function RecordingPlayer({
     [draft.markers, draft.durationSec],
   );
 
+  const pan = useMemo(
+    () =>
+      PanResponder.create({
+        onMoveShouldSetPanResponder: (_, g) => Math.abs(g.dy) > 8,
+        onPanResponderRelease: (_, g) => {
+          if (g.dy > 48) {
+            setExpanded(true);
+          } else if (g.dy < -48) {
+            setExpanded(false);
+          }
+        },
+      }),
+    [],
+  );
+
   async function persistMarkers(next: RecordingMarker[]) {
     const updated = await updateRecordingMarkers(draft.id, next);
     if (updated) {
@@ -139,7 +155,7 @@ function RecordingPlayer({
     }
   }
 
-  function addMarkerAtPlayhead() {
+  function addMarker() {
     const sec = Math.floor(player.currentTime);
     const next = normalizeMarkers(
       [
@@ -147,12 +163,11 @@ function RecordingPlayer({
         {
           id: `m-${Date.now()}`,
           sec,
-          label: labelDraft.trim() || `Mark ${draft.markers.length}`,
+          label: formatTimer(sec),
         },
       ],
       draft.durationSec,
     );
-    setLabelDraft('');
     void persistMarkers(next);
   }
 
@@ -178,7 +193,7 @@ function RecordingPlayer({
     try {
       const assetId = await saveRecordingToPhotos(draft);
       setDraft((current) => ({ ...current, photosAssetId: assetId }));
-      Alert.alert('Saved', 'Full take saved to Photos.');
+      Alert.alert('Saved', 'Saved to Photos.');
     } catch (error) {
       Alert.alert('Save failed', error instanceof Error ? error.message : 'Unknown error');
     } finally {
@@ -190,19 +205,14 @@ function RecordingPlayer({
     const from = sorted.find((m) => m.id === fromId);
     const to = sorted.find((m) => m.id === toId);
     if (!from || !to || to.sec <= from.sec) {
-      Alert.alert('Pick markers', 'Choose a start marker before an end marker.');
+      Alert.alert('Pick markers', 'Start must be before end.');
       return;
     }
     setBusy(true);
     try {
       const result = await saveRecordingRangeToPhotos(draft, from.sec, to.sec);
       setDraft((current) => ({ ...current, photosAssetId: result.assetId }));
-      Alert.alert(
-        'Saved to Photos',
-        result.clipped
-          ? `Full take saved. Playback range ${formatTimer(from.sec)} → ${formatTimer(to.sec)} is marked in-app (Photos gets the full file so you can trim there if needed).`
-          : 'Full take saved to Photos.',
-      );
+      Alert.alert('Saved', 'Saved to Photos.');
     } catch (error) {
       Alert.alert('Save failed', error instanceof Error ? error.message : 'Unknown error');
     } finally {
@@ -213,16 +223,11 @@ function RecordingPlayer({
   function confirmDelete() {
     Alert.alert(
       'Delete recording?',
-      draft.photosAssetId
-        ? 'Also delete the Photos copy of this take?'
-        : 'Remove this take from the app library?',
+      draft.photosAssetId ? 'Also delete the Photos copy?' : 'Remove from BlacRec?',
       draft.photosAssetId
         ? [
             { text: 'Cancel', style: 'cancel' },
-            {
-              text: 'App only',
-              onPress: () => void runDelete(false),
-            },
+            { text: 'App only', onPress: () => void runDelete(false) },
             {
               text: 'App + Photos',
               style: 'destructive',
@@ -252,19 +257,40 @@ function RecordingPlayer({
     }
   }
 
+  const winH = Dimensions.get('window').height;
+
   return (
     <View style={styles.playerRoot}>
-      <View style={styles.header}>
-        <Pressable onPress={onBack}>
-          <Text style={styles.link}>‹ Back</Text>
-        </Pressable>
-        <Text style={styles.titleSmall}>{formatRecordingStamp(draft.createdAt)}</Text>
-        <View style={{ width: 48 }} />
+      {!expanded ? (
+        <View style={styles.header}>
+          <Pressable onPress={onBack}>
+            <Text style={styles.link}>‹ Back</Text>
+          </Pressable>
+          <Text style={styles.titleSmall} numberOfLines={1}>
+            {formatRecordingStamp(draft.createdAt)}
+          </Text>
+          <View style={{ width: 48 }} />
+        </View>
+      ) : null}
+
+      <View
+        style={[
+          styles.videoWrap,
+          expanded && { flex: 1, height: undefined, maxHeight: winH },
+        ]}
+        {...pan.panHandlers}
+      >
+        <VideoView style={styles.video} player={player} nativeControls={false} contentFit="contain" />
+        {!expanded ? (
+          <Text style={styles.dragHint}>Drag down for fullscreen</Text>
+        ) : (
+          <Pressable style={styles.shrinkHit} onPress={() => setExpanded(false)}>
+            <Text style={styles.dragHint}>Drag up or tap to shrink</Text>
+          </Pressable>
+        )}
       </View>
 
-      <VideoView style={styles.video} player={player} nativeControls contentFit="contain" />
-
-      <View style={styles.controls}>
+      <View style={[styles.transport, expanded && styles.transportExpanded]}>
         <Pressable
           style={styles.btn}
           onPress={() => {
@@ -277,106 +303,85 @@ function RecordingPlayer({
         >
           <Text style={styles.btnLabel}>{isPlaying ? 'Pause' : 'Play'}</Text>
         </Pressable>
-        <Pressable
-          style={styles.btn}
-          onPress={() => {
-            player.currentTime = 0;
-          }}
-        >
-          <Text style={styles.btnLabel}>Start</Text>
+        <Pressable style={styles.btn} onPress={addMarker}>
+          <Text style={styles.btnLabel}>Add marker</Text>
         </Pressable>
       </View>
 
-      <Text style={styles.section}>Markers</Text>
-      <View style={styles.markerAdd}>
-        <TextInput
-          style={styles.input}
-          value={labelDraft}
-          onChangeText={setLabelDraft}
-          placeholder="New mark label"
-          placeholderTextColor="#71717a"
-        />
-        <Pressable style={styles.btn} onPress={addMarkerAtPlayhead}>
-          <Text style={styles.btnLabel}>Add at playhead</Text>
-        </Pressable>
-      </View>
+      {!expanded ? (
+        <ScrollView style={styles.editor} contentContainerStyle={{ paddingBottom: 16, gap: 6 }}>
+          <Text style={styles.section}>Markers</Text>
+          {sorted.map((item) => (
+            <View key={item.id} style={styles.markerRow}>
+              <Pressable
+                onPress={() => {
+                  player.currentTime = item.sec;
+                }}
+                style={{ flex: 1 }}
+              >
+                <Text style={styles.markerText}>
+                  {formatTimer(item.sec)}
+                  {item.locked ? ' · fixed' : ''}
+                </Text>
+              </Pressable>
+              {!item.locked ? (
+                <View style={styles.markerActions}>
+                  <Pressable onPress={() => moveMarker(item.id, -1)}>
+                    <Text style={styles.link}>-1s</Text>
+                  </Pressable>
+                  <Pressable onPress={() => moveMarker(item.id, 1)}>
+                    <Text style={styles.link}>+1s</Text>
+                  </Pressable>
+                  <Pressable onPress={() => removeMarker(item.id)}>
+                    <Text style={styles.danger}>Del</Text>
+                  </Pressable>
+                </View>
+              ) : null}
+            </View>
+          ))}
 
-      <FlatList
-        data={sorted}
-        keyExtractor={(m) => m.id}
-        style={{ flexGrow: 0, maxHeight: 180 }}
-        renderItem={({ item }) => (
-          <View style={styles.markerRow}>
-            <Pressable
-              onPress={() => {
-                player.currentTime = item.sec;
-              }}
-              style={{ flex: 1 }}
-            >
-              <Text style={styles.markerText}>
-                {item.label ?? item.id} · {formatTimer(item.sec)}
-                {item.locked ? ' · fixed' : ''}
-              </Text>
-            </Pressable>
-            {!item.locked ? (
-              <View style={styles.markerActions}>
-                <Pressable onPress={() => moveMarker(item.id, -1)}>
-                  <Text style={styles.link}>-1s</Text>
-                </Pressable>
-                <Pressable onPress={() => moveMarker(item.id, 1)}>
-                  <Text style={styles.link}>+1s</Text>
-                </Pressable>
-                <Pressable onPress={() => removeMarker(item.id)}>
-                  <Text style={styles.danger}>Del</Text>
-                </Pressable>
-              </View>
-            ) : null}
+          <Text style={styles.section}>Save range</Text>
+          <View style={styles.rangeRow}>
+            <Text style={styles.meta}>From</Text>
+            {sorted.map((m) => (
+              <Pressable
+                key={`from-${m.id}`}
+                style={[styles.chip, fromId === m.id && styles.chipOn]}
+                onPress={() => setFromId(m.id)}
+              >
+                <Text style={[styles.chipLabel, fromId === m.id && styles.chipLabelOn]}>
+                  {formatTimer(m.sec)}
+                </Text>
+              </Pressable>
+            ))}
           </View>
-        )}
-      />
+          <View style={styles.rangeRow}>
+            <Text style={styles.meta}>To</Text>
+            {sorted.map((m) => (
+              <Pressable
+                key={`to-${m.id}`}
+                style={[styles.chip, toId === m.id && styles.chipOn]}
+                onPress={() => setToId(m.id)}
+              >
+                <Text style={[styles.chipLabel, toId === m.id && styles.chipLabelOn]}>
+                  {formatTimer(m.sec)}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
 
-      <Text style={styles.section}>Save range</Text>
-      <View style={styles.rangeRow}>
-        <Text style={styles.meta}>From</Text>
-        {sorted.map((m) => (
-          <Pressable
-            key={`from-${m.id}`}
-            style={[styles.chip, fromId === m.id && styles.chipOn]}
-            onPress={() => setFromId(m.id)}
-          >
-            <Text style={[styles.chipLabel, fromId === m.id && styles.chipLabelOn]}>
-              {m.label ?? m.id}
-            </Text>
+          <Pressable style={styles.btn} disabled={busy} onPress={() => void saveWhole()}>
+            <Text style={styles.btnLabel}>Save whole to Photos</Text>
           </Pressable>
-        ))}
-      </View>
-      <View style={styles.rangeRow}>
-        <Text style={styles.meta}>To</Text>
-        {sorted.map((m) => (
-          <Pressable
-            key={`to-${m.id}`}
-            style={[styles.chip, toId === m.id && styles.chipOn]}
-            onPress={() => setToId(m.id)}
-          >
-            <Text style={[styles.chipLabel, toId === m.id && styles.chipLabelOn]}>
-              {m.label ?? m.id}
-            </Text>
+          <Pressable style={styles.btn} disabled={busy} onPress={() => void saveRange()}>
+            <Text style={styles.btnLabel}>Save From→To to Photos</Text>
           </Pressable>
-        ))}
-      </View>
-
-      <View style={styles.footer}>
-        <Pressable style={styles.btn} disabled={busy} onPress={() => void saveWhole()}>
-          <Text style={styles.btnLabel}>Save whole to Photos</Text>
-        </Pressable>
-        <Pressable style={styles.btn} disabled={busy} onPress={() => void saveRange()}>
-          <Text style={styles.btnLabel}>Save From→To to Photos</Text>
-        </Pressable>
-        <Pressable style={styles.dangerBtn} disabled={busy} onPress={confirmDelete}>
-          <Text style={styles.danger}>Delete</Text>
-        </Pressable>
-      </View>
-      {busy ? <ActivityIndicator color="#fafafa" /> : null}
+          <Pressable style={styles.dangerBtn} disabled={busy} onPress={confirmDelete}>
+            <Text style={styles.danger}>Delete</Text>
+          </Pressable>
+          {busy ? <ActivityIndicator color="#fafafa" /> : null}
+        </ScrollView>
+      ) : null}
     </View>
   );
 }
@@ -387,80 +392,87 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    paddingVertical: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
   },
   title: { color: '#fafafa', fontSize: 22, fontWeight: '700' },
-  titleSmall: { color: '#e4e4e7', fontSize: 13, fontWeight: '600' },
-  link: { color: '#a1a1aa', fontSize: 15, fontWeight: '600' },
-  list: { padding: 16, gap: 8 },
+  titleSmall: { color: '#e4e4e7', fontSize: 12, fontWeight: '600', flex: 1, textAlign: 'center' },
+  link: { color: '#a1a1aa', fontSize: 14, fontWeight: '600' },
+  list: { padding: 14, gap: 8 },
   empty: { color: '#71717a', textAlign: 'center', marginTop: 40 },
   row: {
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: '#18181b',
     borderRadius: 12,
-    padding: 14,
+    padding: 12,
     marginBottom: 8,
   },
   rowTitle: { color: '#fafafa', fontSize: 15, fontWeight: '600' },
-  rowMeta: { color: '#71717a', fontSize: 12, marginTop: 4 },
+  rowMeta: { color: '#71717a', fontSize: 12, marginTop: 3 },
   chev: { color: '#52525b', fontSize: 22 },
-  playerRoot: { flex: 1, paddingBottom: 12 },
-  video: {
+  playerRoot: { flex: 1 },
+  videoWrap: {
     width: '100%',
-    aspectRatio: 16 / 9,
+    height: 180,
     backgroundColor: '#000',
   },
-  controls: { flexDirection: 'row', gap: 8, padding: 12 },
+  video: { width: '100%', height: '100%' },
+  dragHint: {
+    position: 'absolute',
+    bottom: 8,
+    alignSelf: 'center',
+    color: 'rgba(255,255,255,0.4)',
+    fontSize: 10,
+  },
+  shrinkHit: {
+    ...StyleSheet.absoluteFill,
+    justifyContent: 'flex-end',
+    alignItems: 'center',
+    paddingBottom: 10,
+  },
+  transport: {
+    flexDirection: 'row',
+    gap: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+  },
+  transportExpanded: {
+    paddingBottom: 18,
+    backgroundColor: 'rgba(10,10,10,0.92)',
+  },
+  editor: { flex: 1, paddingHorizontal: 12 },
   btn: {
+    flex: 1,
     backgroundColor: '#27272a',
     borderRadius: 10,
     paddingHorizontal: 12,
-    paddingVertical: 10,
+    paddingVertical: 9,
+    alignItems: 'center',
   },
   btnLabel: { color: '#fafafa', fontWeight: '600', fontSize: 13 },
   section: {
     color: '#a1a1aa',
-    fontSize: 12,
+    fontSize: 11,
     textTransform: 'uppercase',
     letterSpacing: 0.5,
-    paddingHorizontal: 12,
-    marginTop: 8,
-    marginBottom: 6,
-  },
-  markerAdd: {
-    flexDirection: 'row',
-    gap: 8,
-    paddingHorizontal: 12,
-    marginBottom: 8,
-  },
-  input: {
-    flex: 1,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: '#3f3f46',
-    borderRadius: 10,
-    color: '#fafafa',
-    paddingHorizontal: 10,
-    paddingVertical: 8,
+    marginTop: 4,
   },
   markerRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
+    paddingVertical: 5,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: '#27272a',
   },
   markerText: { color: '#e4e4e7', fontSize: 13 },
-  markerActions: { flexDirection: 'row', gap: 12 },
+  markerActions: { flexDirection: 'row', gap: 10 },
   rangeRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: 6,
-    paddingHorizontal: 12,
     alignItems: 'center',
-    marginBottom: 6,
+    marginBottom: 4,
   },
   meta: { color: '#71717a', fontSize: 12, marginRight: 4 },
   chip: {
@@ -468,15 +480,11 @@ const styles = StyleSheet.create({
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: '#3f3f46',
     paddingHorizontal: 10,
-    paddingVertical: 6,
+    paddingVertical: 5,
   },
   chipOn: { backgroundColor: '#fafafa', borderColor: '#fafafa' },
   chipLabel: { color: '#e4e4e7', fontSize: 12, fontWeight: '600' },
   chipLabelOn: { color: '#0a0a0a' },
-  footer: { padding: 12, gap: 8 },
-  dangerBtn: {
-    alignItems: 'center',
-    paddingVertical: 12,
-  },
+  dangerBtn: { alignItems: 'center', paddingVertical: 10 },
   danger: { color: '#fca5a5', fontWeight: '700' },
 });

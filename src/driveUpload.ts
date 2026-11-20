@@ -37,10 +37,24 @@ const listeners = new Set<Listener>();
 let ringState: DriveRingState = { status: 'idle', progress: 0 };
 let processing = false;
 
+let clearTimer: ReturnType<typeof setTimeout> | null = null;
+
 function emit(next: DriveRingState) {
   ringState = next;
   listeners.forEach((fn) => fn(next));
   void AsyncStorage.setItem(RING_KEY, JSON.stringify(next)).catch(() => {});
+  if (clearTimer) {
+    clearTimeout(clearTimer);
+    clearTimer = null;
+  }
+  // Brief success/error flash, then clear so the Rec outline stays quiet.
+  if (next.status === 'success' || next.status === 'error') {
+    clearTimer = setTimeout(() => {
+      if (ringState.status === next.status) {
+        emit({ status: 'idle', progress: 0 });
+      }
+    }, next.status === 'success' ? 1200 : 1800);
+  }
 }
 
 export function getDriveRingState(): DriveRingState {

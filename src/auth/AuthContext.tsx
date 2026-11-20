@@ -35,6 +35,7 @@ import {
   ensureUserProfile,
   fetchQuota,
   formatSecondsLeft,
+  unlockUnlimitedLifetime,
   type QuotaState,
 } from '../quota';
 
@@ -51,6 +52,7 @@ type AuthContextValue = {
   signInWithGoogle: () => Promise<void>;
   signOut: () => Promise<void>;
   refreshQuota: () => Promise<QuotaState | null>;
+  unlockUnlimited: () => Promise<QuotaState | null>;
   recordConsumedSeconds: (seconds: number) => Promise<QuotaState | null>;
   queueRecordingUpload: (localPath: string) => Promise<void>;
   flushUploads: () => Promise<void>;
@@ -184,6 +186,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setQuota(null);
   }, []);
 
+  const unlockUnlimited = useCallback(async () => {
+    const current = auth.currentUser;
+    if (!current) {
+      return null;
+    }
+    const next = await unlockUnlimitedLifetime(current.uid);
+    setQuota(next);
+    return next;
+  }, []);
+
   const recordConsumedSeconds = useCallback(async (seconds: number) => {
     const current = auth.currentUser;
     if (!current) {
@@ -218,11 +230,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       signingIn,
       authError,
       quota,
-      quotaLabel: formatSecondsLeft(quota?.secondsLeft ?? 0),
+      quotaLabel: formatSecondsLeft(quota?.secondsLeft ?? 0, Boolean(quota?.unlimited)),
       driveRing,
       signInWithGoogle,
       signOut,
       refreshQuota,
+      unlockUnlimited,
       recordConsumedSeconds,
       queueRecordingUpload,
       flushUploads,
@@ -238,6 +251,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       signInWithGoogle,
       signOut,
       refreshQuota,
+      unlockUnlimited,
       recordConsumedSeconds,
       queueRecordingUpload,
       flushUploads,

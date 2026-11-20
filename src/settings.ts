@@ -15,9 +15,9 @@ export type BrightnessId = 'dim' | 'medium' | 'bright';
 export type OrientationId = 'auto' | 'portrait' | 'landscape';
 /** 0 = off; otherwise minutes between auto-splits (1–60). */
 export type SplitMinutes = number;
-export type CoverPreset = 'image' | 'black' | 'text' | 'lock' | 'playlist';
+export type CoverPreset = 'image' | 'black' | 'text' | 'lock';
 
-const LEGACY_SKINS = new Set(['messages', 'notes', 'spotify', 'calculator', 'clock']);
+const LEGACY_SKINS = new Set(['messages', 'notes', 'spotify', 'calculator', 'clock', 'playlist']);
 
 export type TextLayer = {
   id: string;
@@ -156,18 +156,22 @@ function clampSplit(value: unknown): number {
 }
 
 function migrate(raw: Partial<Settings>): Settings {
-  const coverPreset = LEGACY_SKINS.has(String(raw.coverPreset))
-    ? 'black'
-    : (raw.coverPreset as CoverPreset | undefined);
+  let coverPreset = raw.coverPreset as CoverPreset | string | undefined;
+  let playlistUris = Array.isArray(raw.playlistUris) ? raw.playlistUris : [];
+  if (coverPreset === 'playlist') {
+    coverPreset = 'image';
+  } else if (LEGACY_SKINS.has(String(coverPreset))) {
+    coverPreset = 'black';
+  }
   return {
     ...DEFAULT_SETTINGS,
     ...raw,
-    coverPreset: coverPreset ?? DEFAULT_SETTINGS.coverPreset,
+    coverPreset: (coverPreset as CoverPreset | undefined) ?? DEFAULT_SETTINGS.coverPreset,
+    playlistUris,
     lockPin: typeof raw.lockPin === 'string' ? raw.lockPin.replace(/[^0-9]/g, '').slice(0, 6) : '',
     appLockPin:
       typeof raw.appLockPin === 'string' ? raw.appLockPin.replace(/[^0-9]/g, '').slice(0, 6) : '',
     textPresets: Array.isArray(raw.textPresets) ? raw.textPresets : [],
-    playlistUris: Array.isArray(raw.playlistUris) ? raw.playlistUris : [],
     playlistSeconds:
       typeof raw.playlistSeconds === 'number' && raw.playlistSeconds >= 10
         ? raw.playlistSeconds
@@ -261,11 +265,14 @@ export function newTextPreset(name = 'My text'): TextPreset {
 }
 
 export function coverReady(settings: Settings): boolean {
+  if (settings.usePhoneRegularly) {
+    return true;
+  }
   if (settings.coverPreset === 'black') {
     return true;
   }
   if (settings.coverPreset === 'image') {
-    return Boolean(settings.coverUri);
+    return Boolean(settings.coverUri) || settings.playlistUris.length > 0;
   }
   if (settings.coverPreset === 'text') {
     return Boolean(
@@ -273,12 +280,17 @@ export function coverReady(settings: Settings): boolean {
         settings.textPresets.some((item) => item.id === settings.activeTextPresetId),
     );
   }
-  if (settings.coverPreset === 'playlist') {
-    return settings.playlistUris.length > 0;
-  }
   return Boolean(
     settings.lockWallpaperUri && settings.homeShotUri && settings.lockPin.length >= 4,
   );
+}
+
+/** Images used for image cover: multi-uris rotate; single coverUri is fine alone. */
+export function imageCoverUris(settings: Settings): string[] {
+  if (settings.playlistUris.length > 0) {
+    return settings.playlistUris;
+  }
+  return settings.coverUri ? [settings.coverUri] : [];
 }
 
 function snapshotFromSettings(settings: Settings): UserPreset['snapshot'] {
@@ -295,7 +307,9 @@ function snapshotFromSettings(settings: Settings): UserPreset['snapshot'] {
 
 export function applyUserPreset(settings: Settings, preset: UserPreset): Settings {
   const snap = { ...preset.snapshot };
-  if (LEGACY_SKINS.has(String(snap.coverPreset))) {
+  if (String(snap.coverPreset) === 'playlist') {
+    snap.coverPreset = 'image';
+  } else if (LEGACY_SKINS.has(String(snap.coverPreset))) {
     snap.coverPreset = 'black';
   }
   return {

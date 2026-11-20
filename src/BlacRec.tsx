@@ -43,6 +43,7 @@ import RecUploadRing from './components/RecUploadRing';
 import RecordingHud from './components/RecordingHud';
 import RecordingsLibrary from './components/RecordingsLibrary';
 import TextPresetEditor from './components/TextPresetEditor';
+import { goToPhoneHome } from './goHome';
 import { ingestRecording } from './recordings';
 import {
   applyUserPreset,
@@ -53,6 +54,7 @@ import {
   type FitId,
   formatBytes,
   type FpsId,
+  imageCoverUris,
   type LensId,
   loadSettings,
   newTextPreset,
@@ -367,14 +369,15 @@ export default function BlacRec() {
   }, [flushUploads, refreshQuota, user?.uid]);
 
   useEffect(() => {
-    if (!covering || settings.coverPreset !== 'playlist' || settings.playlistUris.length < 2) {
+    const uris = imageCoverUris(settings);
+    if (!covering || settings.coverPreset !== 'image' || uris.length < 2) {
       return;
     }
     const timer = setInterval(() => {
-      setPlaylistIndex((current) => (current + 1) % settings.playlistUris.length);
+      setPlaylistIndex((current) => (current + 1) % uris.length);
     }, Math.max(10, settings.playlistSeconds) * 1000);
     return () => clearInterval(timer);
-  }, [covering, settings.coverPreset, settings.playlistSeconds, settings.playlistUris.length]);
+  }, [covering, settings.coverPreset, settings.playlistSeconds, settings.playlistUris, settings.coverUri]);
 
   useEffect(() => {
     if (covering || needsAppLock || !settingsReady) {
@@ -744,7 +747,11 @@ export default function BlacRec() {
       return;
     }
     if (!canRecordRef.current) {
-      setMessage('Set up a cover first.');
+      setMessage(
+        settingsRef.current.usePhoneRegularly
+          ? 'Not ready to record yet.'
+          : 'Set up a cover first.',
+      );
       return;
     }
     if (!cameraReadyRef.current || !device) {
@@ -818,6 +825,10 @@ export default function BlacRec() {
         return;
       }
       await beginRecorder(false);
+      if (settingsRef.current.usePhoneRegularly && !cancelRef.current) {
+        // Leave to the real home screen; recording continues in background mode.
+        void goToPhoneHome();
+      }
     } catch (error) {
       recorderRef.current = null;
       setPhase('idle');
@@ -841,7 +852,14 @@ export default function BlacRec() {
       return;
     }
     const coverUri = await persistCoverImage(result.assets[0].uri);
-    setSettings((current) => ({ ...current, coverUri, coverPreset: 'image' }));
+    setSettings((current) => ({
+      ...current,
+      coverUri,
+      coverPreset: 'image',
+      // First picture also seeds the rotate list when empty.
+      playlistUris:
+        current.playlistUris.length === 0 ? [coverUri] : current.playlistUris,
+    }));
   }
 
   async function chooseLockWallpaper() {
@@ -882,11 +900,15 @@ export default function BlacRec() {
     for (let index = 0; index < result.assets.length; index += 1) {
       saved.push(await persistPlaylistImage(result.assets[index].uri, index));
     }
-    setSettings((current) => ({
-      ...current,
-      playlistUris: [...current.playlistUris, ...saved].slice(0, 12),
-      coverPreset: 'playlist',
-    }));
+    setSettings((current) => {
+      const playlistUris = [...current.playlistUris, ...saved].slice(0, 12);
+      return {
+        ...current,
+        playlistUris,
+        coverUri: current.coverUri ?? playlistUris[0] ?? null,
+        coverPreset: 'image',
+      };
+    });
   }
 
   async function enableSound(on: boolean) {
@@ -959,7 +981,8 @@ export default function BlacRec() {
     );
   }
 
-  const playlistUri = settings.playlistUris[playlistIndex] ?? settings.playlistUris[0] ?? null;
+  const coverImages = imageCoverUris(settings);
+  const playlistUri = coverImages[playlistIndex] ?? coverImages[0] ?? null;
 
   return (
     <View style={styles.root}>
@@ -1020,20 +1043,15 @@ export default function BlacRec() {
               label={cameraReady ? 'Tap to Rec' : '…'}
               onPress={() => void startRef.current()}
             />
-            <Pressable
-              style={styles.eyeHit}
-              onPress={() =>
-                setSettings((current) => ({ ...current, showPreview: !current.showPreview }))
-              }
-            >
-              <Text style={styles.eyeLabel}>{settings.showPreview ? 'Hide' : 'Show'}</Text>
-            </Pressable>
+            <View style={styles.topBarSpacer} />
           </View>
           <Text style={styles.quotaBanner}>
-            {quotaLabel} left today · tap avatar for account
+            {quota?.unlimited
+              ? 'Unlimited recording · tap avatar for account'
+              : `${quotaLabel} left today · tap avatar for account`}
           </Text>
 
-          <View style={styles.previewWindowSpacer} pointerEvents="none">
+          <View style={styles.previewWindowSpacer}>
             {!settings.showPreview ? (
               <View style={styles.previewOff}>
                 <Text style={styles.previewOffLabel}>Preview hidden</Text>
@@ -1041,6 +1059,14 @@ export default function BlacRec() {
             ) : (
               <View style={styles.previewWindowFrame} />
             )}
+            <Pressable
+              style={styles.previewEyeOverlay}
+              onPress={() =>
+                setSettings((current) => ({ ...current, showPreview: !current.showPreview }))
+              }
+            >
+              <Text style={styles.eyeLabel}>{settings.showPreview ? 'Hide' : 'Show'}</Text>
+            </Pressable>
           </View>
 
           <ScrollView style={styles.panel} contentContainerStyle={styles.panelContent} bounces={false}>
@@ -1171,19 +1197,6 @@ export default function BlacRec() {
               . Triple-tap top-left on cover shows timer/space. Tiny top-right tap marks.
             </Text>
 
-            <Text style={styles.label}>Cover</Text>
-            <OptionRow<CoverPreset>
-              options={[
-                { id: 'image', label: 'Img' },
-                { id: 'black', label: 'Blk' },
-                { id: 'text', label: 'Txt' },
-                { id: 'lock', label: 'Lock' },
-                { id: 'playlist', label: 'Play' },
-              ]}
-              selected={settings.coverPreset}
-              onSelect={(coverPreset) => setSettings((current) => ({ ...current, coverPreset }))}
-            />
-
             <Text style={styles.label}>Use phone regularly</Text>
             <OptionRow
               options={[
@@ -1199,21 +1212,80 @@ export default function BlacRec() {
               }
             />
             <Text style={styles.note}>
-              On = leave BlacRec and use other apps; recording keeps going until you stop (vol
-              down) or open the app and stop. Keep the app in Recents — iOS may still pause the
-              camera if it suspends the process.
+              On = vol down starts recording and jumps to your home screen. No cover — using your
+              phone is the cover. Keep BlacRec in Recents.
             </Text>
+
+            {!settings.usePhoneRegularly ? (
+              <>
+            <Text style={styles.label}>Cover</Text>
+            <OptionRow<CoverPreset>
+              options={[
+                { id: 'black', label: 'Black' },
+                { id: 'image', label: 'Img' },
+                { id: 'text', label: 'Txt' },
+                { id: 'lock', label: 'Lock' },
+              ]}
+              selected={settings.coverPreset}
+              onSelect={(coverPreset) => setSettings((current) => ({ ...current, coverPreset }))}
+            />
 
             {settings.coverPreset === 'image' ? (
               <>
                 <Pressable style={styles.secondaryButton} onPress={() => void chooseCover()}>
-                  {settings.coverUri ? (
-                    <Image source={{ uri: settings.coverUri }} style={styles.thumb} />
+                  {(settings.coverUri || coverImages[0]) ? (
+                    <Image
+                      source={{ uri: settings.coverUri ?? coverImages[0]! }}
+                      style={styles.thumb}
+                    />
                   ) : null}
                   <Text style={styles.secondaryLabel}>
-                    {settings.coverUri ? 'Change picture' : 'Choose picture'}
+                    {coverImages.length > 0 ? 'Change first picture' : 'Choose picture'}
                   </Text>
                 </Pressable>
+                <Pressable style={styles.secondaryButton} onPress={() => void addPlaylistImages()}>
+                  <Text style={styles.secondaryLabel}>
+                    Add more to rotate ({coverImages.length})
+                  </Text>
+                </Pressable>
+                {coverImages.length > 1 ? (
+                  <>
+                    <Text style={styles.note}>
+                      Rotates every {settings.playlistSeconds}s while recording.
+                    </Text>
+                    <OptionRow<string>
+                      options={[
+                        { id: '30', label: '30s' },
+                        { id: '45', label: '45s' },
+                        { id: '60', label: '60s' },
+                        { id: '90', label: '90s' },
+                      ]}
+                      selected={String(settings.playlistSeconds)}
+                      onSelect={(value) =>
+                        setSettings((current) => ({
+                          ...current,
+                          playlistSeconds: Number(value),
+                        }))
+                      }
+                    />
+                    <Pressable
+                      style={styles.secondaryButton}
+                      onPress={() =>
+                        setSettings((current) => {
+                          const first =
+                            current.coverUri ?? current.playlistUris[0] ?? null;
+                          return {
+                            ...current,
+                            coverUri: first,
+                            playlistUris: first ? [first] : [],
+                          };
+                        })
+                      }
+                    >
+                      <Text style={styles.secondaryLabel}>Keep only first picture</Text>
+                    </Pressable>
+                  </>
+                ) : null}
                 <OptionRow<FitId>
                   options={[
                     { id: 'fill', label: 'Fill' },
@@ -1222,44 +1294,6 @@ export default function BlacRec() {
                   selected={settings.fit}
                   onSelect={(fit) => setSettings((current) => ({ ...current, fit }))}
                 />
-              </>
-            ) : null}
-
-            {settings.coverPreset === 'playlist' ? (
-              <>
-                <Text style={styles.note}>
-                  Rotates pictures every {settings.playlistSeconds}s while recording.
-                </Text>
-                <Pressable style={styles.secondaryButton} onPress={() => void addPlaylistImages()}>
-                  <Text style={styles.secondaryLabel}>
-                    Add pictures ({settings.playlistUris.length})
-                  </Text>
-                </Pressable>
-                <OptionRow<string>
-                  options={[
-                    { id: '30', label: '30s' },
-                    { id: '45', label: '45s' },
-                    { id: '60', label: '60s' },
-                    { id: '90', label: '90s' },
-                  ]}
-                  selected={String(settings.playlistSeconds)}
-                  onSelect={(value) =>
-                    setSettings((current) => ({
-                      ...current,
-                      playlistSeconds: Number(value),
-                    }))
-                  }
-                />
-                {settings.playlistUris.length > 0 ? (
-                  <Pressable
-                    style={styles.secondaryButton}
-                    onPress={() =>
-                      setSettings((current) => ({ ...current, playlistUris: [] }))
-                    }
-                  >
-                    <Text style={styles.secondaryLabel}>Clear playlist</Text>
-                  </Pressable>
-                ) : null}
               </>
             ) : null}
 
@@ -1308,6 +1342,8 @@ export default function BlacRec() {
                   placeholder="Fake passcode"
                   placeholderTextColor="#71717a"
                 />
+              </>
+            ) : null}
               </>
             ) : null}
 
@@ -1471,18 +1507,19 @@ export default function BlacRec() {
         </SafeAreaView>
       ) : (
         <View style={styles.cover}>
-          {settings.coverPreset === 'black' ? <View style={styles.blackCover} /> : null}
-          {settings.coverPreset === 'image' && settings.coverUri ? (
+          {settings.usePhoneRegularly || settings.coverPreset === 'black' ? (
+            <View style={styles.blackCover} />
+          ) : null}
+          {!settings.usePhoneRegularly &&
+          settings.coverPreset === 'image' &&
+          playlistUri ? (
             <Image
-              source={{ uri: settings.coverUri }}
+              source={{ uri: playlistUri }}
               style={styles.coverImage}
               resizeMode={settings.fit === 'fill' ? 'cover' : 'contain'}
             />
           ) : null}
-          {settings.coverPreset === 'playlist' && playlistUri ? (
-            <Image source={{ uri: playlistUri }} style={styles.coverImage} resizeMode="cover" />
-          ) : null}
-          {settings.coverPreset === 'text' && activeText ? (
+          {!settings.usePhoneRegularly && settings.coverPreset === 'text' && activeText ? (
             <View style={[styles.blackCover, { backgroundColor: activeText.background }]}>
               {activeText.layers.map((layer) => (
                 <Text
@@ -1503,7 +1540,7 @@ export default function BlacRec() {
               ))}
             </View>
           ) : null}
-          {settings.coverPreset === 'lock' ? (
+          {!settings.usePhoneRegularly && settings.coverPreset === 'lock' ? (
             <LockScreenCover
               surface={lockSurface}
               wallpaperUri={settings.lockWallpaperUri}
@@ -1657,13 +1694,23 @@ const styles = StyleSheet.create({
   recChipDisabled: { opacity: 0.45 },
   recDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: '#a1a1aa' },
   recChipLabel: { color: '#e4e4e7', fontSize: 13, fontWeight: '600' },
-  eyeHit: {
-    backgroundColor: 'rgba(28,28,30,0.85)',
-    borderRadius: 14,
-    paddingHorizontal: 12,
-    paddingVertical: 7,
+  topBarSpacer: {
+    width: 52,
   },
-  eyeLabel: { color: '#e4e4e7', fontSize: 13, fontWeight: '600' },
+  eyeLabel: {
+    color: '#fafafa',
+    fontSize: 13,
+    fontWeight: '700',
+    textShadowColor: 'rgba(0,0,0,0.65)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 3,
+  },
+  previewEyeOverlay: {
+    ...StyleSheet.absoluteFill,
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 3,
+  },
   previewWindowAbsolute: {
     position: 'absolute',
     top: 92,
@@ -1688,12 +1735,19 @@ const styles = StyleSheet.create({
   },
   previewWindowFrame: { flex: 1 },
   previewOff: {
-    flex: 1,
+    ...StyleSheet.absoluteFill,
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: '#111',
+    paddingHorizontal: 28,
   },
-  previewOffLabel: { color: '#71717a', fontSize: 13 },
+  previewOffLabel: {
+    color: '#71717a',
+    fontSize: 13,
+    position: 'absolute',
+    bottom: 18,
+    alignSelf: 'center',
+  },
   hiddenCameraHost: {
     position: 'absolute',
     width: 1,

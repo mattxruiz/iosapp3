@@ -10,7 +10,7 @@ jobs:
     env:
       # Bump this if a warm cache ever looks broken.
       # Bump when app.json plugins / native config change so prebuild is not skipped on a bad cache.
-      CACHE_EPOCH: v6
+      CACHE_EPOCH: v7
     steps:
       - name: Check out the app
         uses: actions/checkout@v4
