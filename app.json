@@ -1,25 +1,26 @@
 {
   "expo": {
-    "name": "Stage Cover",
-    "slug": "stage-cover",
-    "version": "1.4.0",
+    "name": "BlacRec",
+    "slug": "blacrec",
+    "version": "1.5.0",
     "orientation": "default",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
-    "scheme": "stagecover",
+    "scheme": "blacrec",
     "newArchEnabled": true,
     "ios": {
       "bundleIdentifier": "com.mattruiz.stagecover",
       "googleServicesFile": "./GoogleService-Info.plist",
       "supportsTablet": false,
       "infoPlist": {
-        "NSCameraUsageDescription": "Stage Cover uses the camera to record the play.",
-        "NSMicrophoneUsageDescription": "Stage Cover records the play's sound with the video.",
+        "NSCameraUsageDescription": "BlacRec uses the camera to record the play.",
+        "NSMicrophoneUsageDescription": "BlacRec records the play's sound with the video.",
         "ITSAppUsesNonExemptEncryption": false,
+        "UIBackgroundModes": ["audio", "processing"],
         "CFBundleURLTypes": [
           {
             "CFBundleURLSchemes": [
-              "stagecover",
+              "blacrec",
               "com.googleusercontent.apps.266949663759-svhu4seqs0k4kagkjnfdd93i0i501ddg"
             ]
           }
@@ -45,17 +46,19 @@
       [
         "expo-image-picker",
         {
-          "photosPermission": "Stage Cover uses a picture from your library as the screen while it records.",
-          "cameraPermission": "Stage Cover uses the camera to record the play.",
-          "microphonePermission": "Stage Cover records the play's sound with the video."
+          "photosPermission": "BlacRec uses a picture from your library as the screen while it records.",
+          "cameraPermission": "BlacRec uses the camera to record the play.",
+          "microphonePermission": "BlacRec records the play's sound with the video."
         }
       ],
       [
         "expo-media-library",
         {
-          "photosPermission": "Stage Cover uses a picture from your library as the screen while it records.",
-          "savePhotosPermission": "Stage Cover saves the recording to Photos.",
-          "granularPermissions": ["video"]
+          "photosPermission": "BlacRec uses a picture from your library as the screen while it records.",
+          "savePhotosPermission": "BlacRec saves the recording to Photos.",
+          "granularPermissions": [
+            "video"
+          ]
         }
       ],
       [
@@ -64,7 +67,8 @@
           "startOrientation": "DEFAULT"
         }
       ],
-      "expo-secure-store"
+      "expo-secure-store",
+      "expo-video"
     ]
   }
 }

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   AppState,
   Dimensions,
   Image,
@@ -12,8 +13,9 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import Slider from '@react-native-community/slider';
 import * as Battery from 'expo-battery';
-import { Asset, requestPermissionsAsync } from 'expo-media-library';
+import { createAssetAsync, requestPermissionsAsync } from 'expo-media-library/legacy';
 import * as Brightness from 'expo-brightness';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as ImagePicker from 'expo-image-picker';
@@ -36,16 +38,18 @@ import NetInfo from '@react-native-community/netinfo';
 import { useAuth } from './auth/AuthContext';
 import AccountSidebar from './components/AccountSidebar';
 import AppLockGate from './components/AppLockGate';
-import CoverSkins from './components/CoverSkins';
 import LockScreenCover, { type LockSurface } from './components/LockScreenCover';
 import RecUploadRing from './components/RecUploadRing';
 import RecordingHud from './components/RecordingHud';
+import RecordingsLibrary from './components/RecordingsLibrary';
 import TextPresetEditor from './components/TextPresetEditor';
+import { ingestRecording } from './recordings';
 import {
-  applyShowPreset,
+  applyUserPreset,
   type CoverPreset,
   coverReady,
   DEFAULT_SETTINGS,
+  deleteUserPreset,
   type FitId,
   formatBytes,
   type FpsId,
@@ -57,13 +61,12 @@ import {
   persistHomeShot,
   persistLockWallpaper,
   persistPlaylistImage,
+  renameUserPreset,
   type ResolutionId,
   RESOLUTION_SIZE,
   saveSettings,
+  saveUserPreset,
   type Settings,
-  type ShowPresetId,
-  SKIN_PRESETS,
-  type SplitMinutes,
   type TextPreset,
 } from './settings';
 
@@ -109,7 +112,7 @@ async function saveVideoToPhotos(path: string): Promise<void> {
     throw new Error('Photos access was denied. Allow saving to Photos, then tap Save to Photos.');
   }
   const uri = path.startsWith('file://') ? path : `file://${path}`;
-  await Asset.create(uri);
+  await createAssetAsync(uri);
 }
 
 async function saveMarksFile(marks: number[]): Promise<void> {
@@ -119,12 +122,12 @@ async function saveMarksFile(marks: number[]): Promise<void> {
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const lines = marks.map((sec, index) => `#${index + 1}\t${sec}s`).join('\n');
   await FileSystem.writeAsStringAsync(
-    `${FileSystem.documentDirectory}stage-marks-${stamp}.txt`,
-    `Stage Cover marks\n${lines}\n`,
+    `${FileSystem.documentDirectory}blacrec-marks-${stamp}.txt`,
+    `BlacRec marks\n${lines}\n`,
   );
 }
 
-export default function StageCover() {
+export default function BlacRec() {
   const cameraPermission = useCameraPermission();
   const microphonePermission = useMicrophonePermission();
   const wideDevice = useCameraDevice('back', {
@@ -164,6 +167,10 @@ export default function StageCover() {
   const [playlistIndex, setPlaylistIndex] = useState(0);
   const [markFlash, setMarkFlash] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
+  const [hudVisible, setHudVisible] = useState(false);
+  const [recordingsOpen, setRecordingsOpen] = useState(false);
+  const [presetNameDraft, setPresetNameDraft] = useState('');
+  const [renameDraft, setRenameDraft] = useState('');
 
   const phaseRef = useRef<Phase>('idle');
   const settingsRef = useRef(settings);
@@ -188,14 +195,17 @@ export default function StageCover() {
   const segmentStartedAtRef = useRef(0);
   const quotaLeftAtStartRef = useRef(0);
   const marksRef = useRef<number[]>([]);
+  const lastStartTapRef = useRef(0);
   const recordConsumedSecondsRef = useRef(recordConsumedSeconds);
   const queueRecordingUploadRef = useRef(queueRecordingUpload);
+  const quotaLeftRef = useRef(0);
 
   settingsRef.current = settings;
   cameraReadyRef.current = cameraReady;
   marksRef.current = marks;
   recordConsumedSecondsRef.current = recordConsumedSeconds;
   queueRecordingUploadRef.current = queueRecordingUpload;
+  quotaLeftRef.current = quota?.secondsLeft ?? 0;
 
   const device = useMemo(() => {
     if (settings.lens === 'front') {
@@ -283,13 +293,18 @@ export default function StageCover() {
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (state) => {
       // Control Center / notification shade = "inactive". Keep recording.
-      // Only treat true background (left the app) as leave-app.
       if (state === 'active') {
         setAppActive(true);
         void flushUploads();
         return;
       }
       if (state === 'inactive') {
+        setAppActive(true);
+        return;
+      }
+      // True background (home / other apps).
+      if (settingsRef.current.usePhoneRegularly && phaseRef.current !== 'idle') {
+        // Keep recording while they use the phone normally.
         setAppActive(true);
         return;
       }
@@ -376,27 +391,49 @@ export default function StageCover() {
         if (cancelled) {
           return;
         }
-        lastVolume = current.volume;
+        previousVolumeRef.current = current.volume;
         await VolumeManager.showNativeVolumeUI({ enabled: false });
+        // Park mid-scale so every vol-down is detectable (floor/ceiling miss taps).
+        await VolumeManager.setVolume(0.5, { showUI: false, playSound: false }).catch(() => {});
+        lastVolume = 0.5;
         const listener = VolumeManager.addVolumeListener((result) => {
           if (!armed) {
             lastVolume = result.volume;
             return;
           }
+          const delta = result.volume - lastVolume;
           const goingDown =
-            result.volume < lastVolume - 0.001 || (lastVolume <= 0.02 && result.volume <= 0.02);
+            delta < -0.008 ||
+            (lastVolume <= 0.04 && result.volume <= lastVolume) ||
+            (lastVolume <= 0.02 && result.volume <= 0.02);
           lastVolume = result.volume;
-          if (goingDown && phaseRef.current === 'idle') {
-            void startRef.current();
+          if (!goingDown || phaseRef.current !== 'idle') {
+            return;
           }
+          const now = Date.now();
+          if (now - lastStartTapRef.current < 900) {
+            return;
+          }
+          lastStartTapRef.current = now;
+          // Nudge volume back up so the next press still has room to drop.
+          void VolumeManager.setVolume(0.55, { showUI: false, playSound: false }).catch(() => {});
+          lastVolume = 0.55;
+          void startRef.current();
         });
         const timer = setTimeout(() => {
           armed = true;
-        }, 400);
+        }, 250);
         release = async () => {
           clearTimeout(timer);
           armed = false;
           listener.remove();
+          if (previousVolumeRef.current != null && phaseRef.current === 'idle') {
+            await VolumeManager.setVolume(previousVolumeRef.current, {
+              showUI: false,
+              playSound: false,
+            }).catch(() => {});
+            previousVolumeRef.current = null;
+          }
           await VolumeManager.showNativeVolumeUI({ enabled: true }).catch(() => {});
         };
       } catch {
@@ -432,15 +469,14 @@ export default function StageCover() {
     }
     setLockSurface((current) => {
       if (current === 'off') {
-        // Wake: restore the system brightness we captured when recording started.
+        // Wake like a real phone: always land on the fake lock picture.
         const restore = previousBrightnessRef.current;
         if (restore != null) {
           void Brightness.setBrightnessAsync(restore).catch(() => {});
         }
-        // Return to wherever they were (home stays home, lock stays lock).
-        return lastLitSurfaceRef.current;
+        lastLitSurfaceRef.current = 'lock';
+        return 'lock';
       }
-      // Sleep: remember home/passcode/lock, then go fully black.
       lastLitSurfaceRef.current = current;
       void Brightness.setBrightnessAsync(0).catch(() => {});
       return 'off';
@@ -527,16 +563,49 @@ export default function StageCover() {
       // Quota write can fail offline; still keep the take.
     }
     void queueRecordingUploadRef.current(path);
+
+    let photosAssetId: string | null = null;
+    let photosFailed = false;
+    const autoSave = settingsRef.current.autoSaveToPhotos;
+    if (autoSave) {
+      try {
+        const uri = path.startsWith('file://') ? path : `file://${path}`;
+        const permission = await requestPermissionsAsync(true, ['video']);
+        if (!permission.granted) {
+          throw new Error('Photos access was denied.');
+        }
+        const asset = await createAssetAsync(uri);
+        photosAssetId = asset.id;
+      } catch (error) {
+        photosFailed = true;
+        if (!keepGoing) {
+          setMessage(errorText(error));
+        }
+      }
+    }
+
     try {
-      await saveVideoToPhotos(path);
+      await ingestRecording({
+        sourcePath: path,
+        durationSec: segmentSeconds,
+        marks: keepGoing ? [] : marksRef.current,
+        photosAssetId,
+      });
       if (!keepGoing) {
-        setUnsavedPath(null);
         await saveMarksFile(marksRef.current);
-        setMessage(
-          marksRef.current.length > 0
-            ? `Saved to Photos. ${marksRef.current.length} mark(s) saved in app files.`
-            : 'Saved to Photos.',
-        );
+        if (autoSave && !photosFailed) {
+          setUnsavedPath(null);
+          setMessage(
+            marksRef.current.length > 0
+              ? `In Recordings + Photos. ${marksRef.current.length} mark(s).`
+              : 'In Recordings + Photos.',
+          );
+        } else {
+          setUnsavedPath(path);
+          if (!photosFailed) {
+            setMessage('Saved in Recordings. Photos auto-save is off.');
+          }
+        }
       }
     } catch (error) {
       if (!keepGoing) {
@@ -683,46 +752,35 @@ export default function StageCover() {
       return;
     }
 
-    let left = quota?.secondsLeft ?? 0;
-    try {
-      const fresh = await refreshQuota();
-      if (fresh) {
-        left = fresh.secondsLeft;
-      }
-    } catch {
-      // use cached quota
-    }
+    // Use cached quota only — never await network before arming the take (vol-down lag).
+    const left = quotaLeftRef.current;
     if (left <= 0) {
       setMessage('No recording time left. Resets 24h after your window started — check Account.');
+      void refreshQuota();
       return;
     }
     quotaLeftAtStartRef.current = left;
-
-    try {
-      const free = await FileSystem.getFreeDiskStorageAsync();
-      setFreeBytes(free);
-      if (free < LOW_STORAGE_BYTES) {
-        setMessage(
-          `Low storage (${formatBytes(free)}). Use 1080p/30 or free space before a long take.`,
-        );
-      }
-    } catch {
-      // ignore
-    }
-
-    const level = await Battery.getBatteryLevelAsync().catch(() => -1);
-    const power = await Battery.isLowPowerModeEnabledAsync().catch(() => false);
-    if (level >= 0) {
-      setBatteryLevel(level);
-    }
-    setLowPower(power);
-    if ((level >= 0 && level < 0.2) || power) {
-      setMessage(
-        power
-          ? 'Low Power Mode on — phone may throttle. Plug in if you can.'
-          : `Battery ${Math.round((level as number) * 100)}%. Plug in for a long play.`,
-      );
-    }
+    void refreshQuota();
+    void FileSystem.getFreeDiskStorageAsync()
+      .then((free) => {
+        setFreeBytes(free);
+        if (free < LOW_STORAGE_BYTES) {
+          setMessage(
+            `Low storage (${formatBytes(free)}). Use 1080p/30 or free space before a long take.`,
+          );
+        }
+      })
+      .catch(() => {});
+    void Battery.getBatteryLevelAsync()
+      .then((level) => {
+        if (level >= 0) {
+          setBatteryLevel(level);
+        }
+      })
+      .catch(() => {});
+    void Battery.isLowPowerModeEnabledAsync()
+      .then((power) => setLowPower(power))
+      .catch(() => {});
 
     if (settingsRef.current.mic && !microphonePermission.hasPermission) {
       if (microphonePermission.canRequestPermission) {
@@ -747,11 +805,11 @@ export default function StageCover() {
     setLockSurface('lock');
     lastLitSurfaceRef.current = 'lock';
     setPlaylistIndex(0);
+    setHudVisible(false);
     setPhase('starting');
 
     try {
       await activateKeepAwakeAsync();
-      // Keep whatever brightness the phone already has. Only fake-power sets it to 0.
       previousBrightnessRef.current = await Brightness.getBrightnessAsync().catch(() => null);
       await armRecordingVolumeButtons();
       if (cancelRef.current) {
@@ -850,15 +908,32 @@ export default function StageCover() {
     setSettings((current) => ({ ...current, mic: true }));
   }
 
-  function useShowPreset(id: ShowPresetId) {
-    setSettings((current) => applyShowPreset(current, id));
-    setMessage(
-      id === 'school'
-        ? 'School Play preset loaded.'
-        : id === 'silent'
-          ? 'Silent Recital preset loaded.'
-          : 'Social @ preset loaded.',
-    );
+  function loadSelectedPreset(id: string) {
+    const preset = settings.userPresets.find((item) => item.id === id);
+    if (!preset) {
+      return;
+    }
+    setSettings((current) => applyUserPreset(current, preset));
+    setRenameDraft(preset.name);
+    setMessage(`Loaded “${preset.name}”.`);
+  }
+
+  function saveCurrentAsPreset() {
+    const name = presetNameDraft.trim() || renameDraft.trim();
+    if (!name) {
+      Alert.alert('Name needed', 'Type a preset name first.');
+      return;
+    }
+    setSettings((current) => {
+      const existed = current.userPresets.some(
+        (p) => p.name.toLowerCase() === name.toLowerCase(),
+      );
+      const next = saveUserPreset(current, name);
+      setMessage(existed ? `Overwrote preset “${name}”.` : `Saved preset “${name}”.`);
+      return next;
+    });
+    setPresetNameDraft('');
+    setRenameDraft(name);
   }
 
   if (!cameraPermission.hasPermission) {
@@ -942,7 +1017,7 @@ export default function StageCover() {
               status={driveRing.status}
               progress={driveRing.progress}
               disabled={!canRecord || !cameraReady}
-              label={cameraReady ? 'Rec' : '…'}
+              label={cameraReady ? 'Tap to Rec' : '…'}
               onPress={() => void startRef.current()}
             />
             <Pressable
@@ -1000,31 +1075,100 @@ export default function StageCover() {
               </Text>
             ) : null}
 
-            <Text style={styles.label}>Show presets</Text>
-            <View style={styles.row}>
-              {(
-                [
-                  ['school', 'School Play'],
-                  ['silent', 'Silent'],
-                  ['social', 'Social @'],
-                ] as const
-              ).map(([id, label]) => (
+            <Text style={styles.label}>Presets</Text>
+            {settings.userPresets.length === 0 ? (
+              <Text style={styles.note}>No saved presets yet. Save your current setup below.</Text>
+            ) : (
+              <View style={styles.row}>
+                {settings.userPresets.map((preset) => (
+                  <Pressable
+                    key={preset.id}
+                    style={[
+                      styles.presetChip,
+                      settings.activeUserPresetId === preset.id && styles.presetChipOn,
+                    ]}
+                    onPress={() => loadSelectedPreset(preset.id)}
+                    onLongPress={() => {
+                      Alert.alert(preset.name, undefined, [
+                        { text: 'Cancel', style: 'cancel' },
+                        {
+                          text: 'Delete',
+                          style: 'destructive',
+                          onPress: () =>
+                            setSettings((current) => deleteUserPreset(current, preset.id)),
+                        },
+                      ]);
+                    }}
+                  >
+                    <Text
+                      style={[
+                        styles.presetChipLabel,
+                        settings.activeUserPresetId === preset.id && styles.presetChipLabelOn,
+                      ]}
+                    >
+                      {preset.name}
+                    </Text>
+                  </Pressable>
+                ))}
+              </View>
+            )}
+            <TextInput
+              style={styles.pinInput}
+              value={presetNameDraft}
+              onChangeText={setPresetNameDraft}
+              placeholder="New preset name"
+              placeholderTextColor="#71717a"
+            />
+            <Pressable style={styles.secondaryButton} onPress={saveCurrentAsPreset}>
+              <Text style={styles.secondaryLabel}>Save current as preset</Text>
+            </Pressable>
+            {settings.activeUserPresetId ? (
+              <>
+                <TextInput
+                  style={styles.pinInput}
+                  value={renameDraft}
+                  onChangeText={setRenameDraft}
+                  placeholder="Rename selected preset"
+                  placeholderTextColor="#71717a"
+                />
                 <Pressable
-                  key={id}
-                  style={styles.presetChip}
-                  onPress={() => useShowPreset(id)}
+                  style={styles.secondaryButton}
+                  onPress={() => {
+                    const id = settings.activeUserPresetId;
+                    if (!id || !renameDraft.trim()) {
+                      return;
+                    }
+                    setSettings((current) => renameUserPreset(current, id, renameDraft.trim()));
+                    setMessage(`Renamed to “${renameDraft.trim()}”.`);
+                  }}
                 >
-                  <Text style={styles.presetChipLabel}>{label}</Text>
+                  <Text style={styles.secondaryLabel}>Rename selected preset</Text>
                 </Pressable>
-              ))}
-            </View>
+              </>
+            ) : null}
+
+            <Pressable style={styles.secondaryButton} onPress={() => setRecordingsOpen(true)}>
+              <Text style={styles.secondaryLabel}>Recordings</Text>
+            </Pressable>
+
+            <Text style={styles.label}>Auto-save to Photos</Text>
+            <OptionRow
+              options={[
+                { id: 'on', label: 'On' },
+                { id: 'off', label: 'Off' },
+              ]}
+              selected={settings.autoSaveToPhotos ? 'on' : 'off'}
+              onSelect={(value) =>
+                setSettings((current) => ({ ...current, autoSaveToPhotos: value === 'on' }))
+              }
+            />
 
             <Text style={styles.note}>
               Vol down starts. While recording: vol down stops
               {settings.coverPreset === 'lock'
-                ? '; vol up = power (black / wake to same screen)'
+                ? '; vol up = power (black → wake to lock)'
                 : '; vol up = mark'}
-              . Corner tap marks. Control Center will not stop the take.
+              . Triple-tap top-left on cover shows timer/space. Tiny top-right tap marks.
             </Text>
 
             <Text style={styles.label}>Cover</Text>
@@ -1036,30 +1180,29 @@ export default function StageCover() {
                 { id: 'lock', label: 'Lock' },
                 { id: 'playlist', label: 'Play' },
               ]}
-              selected={
-                SKIN_PRESETS.includes(settings.coverPreset)
-                  ? ('none' as CoverPreset)
-                  : settings.coverPreset
-              }
+              selected={settings.coverPreset}
               onSelect={(coverPreset) => setSettings((current) => ({ ...current, coverPreset }))}
             />
 
-            <Text style={styles.label}>Cover skins</Text>
-            <OptionRow<CoverPreset>
+            <Text style={styles.label}>Use phone regularly</Text>
+            <OptionRow
               options={[
-                { id: 'messages', label: 'Msgs' },
-                { id: 'notes', label: 'Notes' },
-                { id: 'spotify', label: 'Music' },
-                { id: 'calculator', label: 'Calc' },
-                { id: 'clock', label: 'Clock' },
+                { id: 'on', label: 'On' },
+                { id: 'off', label: 'Off' },
               ]}
-              selected={
-                SKIN_PRESETS.includes(settings.coverPreset)
-                  ? settings.coverPreset
-                  : ('none' as CoverPreset)
+              selected={settings.usePhoneRegularly ? 'on' : 'off'}
+              onSelect={(value) =>
+                setSettings((current) => ({
+                  ...current,
+                  usePhoneRegularly: value === 'on',
+                }))
               }
-              onSelect={(coverPreset) => setSettings((current) => ({ ...current, coverPreset }))}
             />
+            <Text style={styles.note}>
+              On = leave BlacRec and use other apps; recording keeps going until you stop (vol
+              down) or open the app and stop. Keep the app in Recents — iOS may still pause the
+              camera if it suspends the process.
+            </Text>
 
             {settings.coverPreset === 'image' ? (
               <>
@@ -1181,23 +1324,26 @@ export default function StageCover() {
               }
             />
 
-            <Text style={styles.label}>Auto-split</Text>
-            <OptionRow<string>
-              options={[
-                { id: '0', label: 'Off' },
-                { id: '10', label: '10m' },
-                { id: '15', label: '15m' },
-                { id: '20', label: '20m' },
-                { id: '30', label: '30m' },
-              ]}
-              selected={String(settings.splitMinutes)}
-              onSelect={(value) =>
+            <Text style={styles.label}>
+              Auto-split · {settings.splitMinutes <= 0 ? 'Off' : `${settings.splitMinutes} min`}
+            </Text>
+            <Slider
+              style={{ width: '100%', height: 36 }}
+              minimumValue={0}
+              maximumValue={60}
+              step={1}
+              value={settings.splitMinutes}
+              minimumTrackTintColor="#e4e4e7"
+              maximumTrackTintColor="#3f3f46"
+              thumbTintColor="#fafafa"
+              onValueChange={(value) =>
                 setSettings((current) => ({
                   ...current,
-                  splitMinutes: Number(value) as SplitMinutes,
+                  splitMinutes: Math.round(value),
                 }))
               }
             />
+            <Text style={styles.note}>0 = off. Splits long takes into chunks at this length.</Text>
 
             <Text style={styles.label}>Battery saver</Text>
             <OptionRow
@@ -1357,11 +1503,6 @@ export default function StageCover() {
               ))}
             </View>
           ) : null}
-          {SKIN_PRESETS.includes(settings.coverPreset) ? (
-            <CoverSkins
-              kind={settings.coverPreset as 'messages' | 'notes' | 'spotify' | 'calculator' | 'clock'}
-            />
-          ) : null}
           {settings.coverPreset === 'lock' ? (
             <LockScreenCover
               surface={lockSurface}
@@ -1389,12 +1530,16 @@ export default function StageCover() {
               freeBytes={freeBytes}
               marks={marks}
               batterySaver={settings.batterySaver}
+              hudVisible={hudVisible}
+              onToggleHud={() => setHudVisible((v) => !v)}
               onMark={() => markRef.current()}
             />
           ) : null}
           {markFlash ? <View style={styles.markFlash} pointerEvents="none" /> : null}
         </View>
       )}
+
+      <RecordingsLibrary visible={recordingsOpen} onClose={() => setRecordingsOpen(false)} />
 
       {needsAppLock ? (
         <AppLockGate pin={settings.appLockPin} onUnlock={() => setAppUnlocked(true)} />
@@ -1603,6 +1748,13 @@ const styles = StyleSheet.create({
   chipActive: { backgroundColor: '#e4e4e7' },
   chipLabel: { color: '#f4f4f5', fontSize: 12, fontWeight: '600' },
   chipLabelActive: { color: '#111' },
+  presetChipOn: {
+    backgroundColor: '#fafafa',
+    borderColor: '#fafafa',
+  },
+  presetChipLabelOn: {
+    color: '#0a0a0a',
+  },
   presetChip: {
     flex: 1,
     minHeight: 40,

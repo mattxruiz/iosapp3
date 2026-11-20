@@ -1,10 +1,11 @@
 {
-  "name": "iosapp",
+  "name": "blacrec",
   "version": "1.0.0",
   "main": "index.ts",
   "dependencies": {
     "@react-native-async-storage/async-storage": "2.2.0",
     "@react-native-community/netinfo": "12.0.1",
+    "@react-native-community/slider": "5.2.1",
     "expo": "~58.0.26",
     "expo-auth-session": "~58.0.19",
     "expo-battery": "~58.0.4",
@@ -17,6 +18,7 @@
     "expo-screen-orientation": "~58.0.4",
     "expo-secure-store": "~58.0.3",
     "expo-status-bar": "~58.0.5",
+    "expo-video": "~58.0.14",
     "expo-web-browser": "~58.1.0",
     "firebase": "12.9.0",
     "react": "19.3.0",

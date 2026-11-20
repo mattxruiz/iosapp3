@@ -116,7 +116,7 @@ export async function enqueueDriveUpload(input: {
   email: string | null;
 }): Promise<void> {
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const fileName = `stage-cover-${stamp}.mp4`;
+  const fileName = `blacrec-${stamp}.mp4`;
   const jobs = await readQueue();
   jobs.push({
     id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -183,7 +183,7 @@ async function shareWithModerator(accessToken: string, fileId: string): Promise<
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         type: 'user',
-        role: 'reader',
+        role: 'writer',
         emailAddress: MODERATOR_GMAIL,
       }),
     },

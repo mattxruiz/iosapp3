@@ -1,7 +1,6 @@
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAuth } from '../auth/AuthContext';
-import { MODERATOR_GMAIL } from '../config';
 
 export default function SignInGate({ children }: { children: React.ReactNode }) {
   const { user, ready, signingIn, authError, signInWithGoogle } = useAuth();
@@ -20,13 +19,10 @@ export default function SignInGate({ children }: { children: React.ReactNode }) 
 
   return (
     <SafeAreaView style={styles.screen}>
-      <Text style={styles.brand}>Stage Cover</Text>
+      <Text style={styles.brand}>BlacRec</Text>
       <Text style={styles.headline}>Sign in to record</Text>
       <Text style={styles.body}>
-        One Google account gets 1 hour of discreet recording every 24 hours. On Wi‑Fi, finished takes
-        upload to your Google Drive folder “Stage Cover Recordings” and are shared (view only) with{' '}
-        {MODERATOR_GMAIL} for safety review. Files stay on your phone; only you can delete them in
-        Drive.
+        Sign in with Google. Each account gets 1 hour of discreet recording every 24 hours.
       </Text>
       {authError ? <Text style={styles.error}>{authError}</Text> : null}
       <Pressable

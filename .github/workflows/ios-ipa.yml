@@ -10,7 +10,7 @@ jobs:
     env:
       # Bump this if a warm cache ever looks broken.
       # Bump when app.json plugins / native config change so prebuild is not skipped on a bad cache.
-      CACHE_EPOCH: v3
+      CACHE_EPOCH: v6
     steps:
       - name: Check out the app
         uses: actions/checkout@v4
@@ -86,17 +86,17 @@ jobs:
             xcodebuild -workspace "${WORKSPACE}" -list \
               | awk '/Schemes:/{flag=1; next} /^$/{flag=0} flag{gsub(/^[ \t]+|[ \t]+$/,""); if (NF) print}'
           )
-          SCHEME=$(echo "${SCHEMES}" | awk '/^StageCover$/{print; found=1; exit} END{if(!found) exit 1}') \
+          SCHEME=$(echo "${SCHEMES}" | awk '/^BlacRec$/{print; found=1; exit} END{if(!found) exit 1}') \
             || SCHEME=$(echo "${SCHEMES}" | head -n 1)
           if [ -z "${SCHEME}" ] || [ "${SCHEME}" = "boost" ]; then
-            echo "Could not find the StageCover app scheme."
+            echo "Could not find the BlacRec app scheme."
             exit 1
           fi
           echo "Using scheme: [${SCHEME}]"
 
           mkdir -p .cache/DerivedData
           DERIVED="${GITHUB_WORKSPACE}/.cache/DerivedData"
-          ARCHIVE="${RUNNER_TEMP}/StageCover.xcarchive"
+          ARCHIVE="${RUNNER_TEMP}/BlacRec.xcarchive"
           JOBS="$(sysctl -n hw.ncpu)"
 
           # Faster device Release build for sideload:
@@ -143,13 +143,13 @@ jobs:
           mkdir -p "${RUNNER_TEMP}/Payload"
           cp -R "${APP}" "${RUNNER_TEMP}/Payload/"
           cd "${RUNNER_TEMP}"
-          zip -r -y "${GITHUB_WORKSPACE}/StageCover-unsigned.ipa" Payload
-          ls -lh "${GITHUB_WORKSPACE}/StageCover-unsigned.ipa"
+          zip -r -y "${GITHUB_WORKSPACE}/BlacRec-unsigned.ipa" Payload
+          ls -lh "${GITHUB_WORKSPACE}/BlacRec-unsigned.ipa"
 
       - name: Upload the IPA
         uses: actions/upload-artifact@v4
         with:
-          name: StageCover-unsigned-ipa
-          path: StageCover-unsigned.ipa
+          name: BlacRec-unsigned-ipa
+          path: BlacRec-unsigned.ipa
           if-no-files-found: error
           retention-days: 7

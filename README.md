@@ -1,54 +1,34 @@
-# Stage Cover
+# BlacRec
 
-Records a play from the front row. After you press the red Record button, the whole phone screen becomes a picture you chose (your social @). The camera keeps recording underneath. Volume up or volume down is the only way to stop. Tapping the screen does nothing, so an accidental touch does not drop the recording.
+Records a play from the front row. After you press Rec, the whole phone screen becomes a cover you chose. The camera keeps recording underneath. Volume controls stop / mark / fake power depending on mode.
 
-The video is saved to the iPhone Photos app.
+The video is saved in the in-app Recordings library (and Photos if auto-save is on).
 
 ## Before the play
 
-1. Open Stage Cover and allow the camera, microphone, and Photos access.
-2. Pick a **cover preset**:
-   - **Image** — your own picture (social @, etc.)
-   - **Black** — full black screen
-   - **Text** — make black cards with custom text, move/size/color, save presets
-   - **Lock** — fake Lock Screen / passcode / Home Screen. Add screenshots of your real Lock Screen and Home Screen. Set the fake passcode. While recording: **volume up = power button** (black ↔ wake), **volume down = stop**
-3. The live camera preview fills most of the screen. Tap the **eye** at the top to hide or show it.
-4. Point the preview at the stage. Use **0.5 wide** if you need the whole stage, **1x** for a tighter view, or **Selfie** for the screen-side camera.
-5. Leave **Flash off**. Flash would light up the stage and the people around you.
-6. For a full-length play, use **1080p** and **30 fps**. 4K is sharper and fills the phone faster. An iPhone 14 records 4K at 30 fps. 60 fps is available at 1080p and 720p. If a combination is not supported, the phone uses the closest one.
-7. Do one short test at home. Press record, confirm the cover looks right, then stop with **volume down**. Open Photos and play the clip.
-8. At the show, do not lock the phone and do not swipe down from the top corner. Either one can interrupt the recording. The screen stays awake on its own. If volume down does not stop the recording, swipe up and close Stage Cover. That take may not be saved.
+1. Open BlacRec and allow the camera, microphone, and Photos access.
+2. Pick a **cover**: Image, Black, Text, Lock, or Playlist.
+3. Optionally turn on **Use phone regularly** if you need to leave the app while it keeps recording.
+4. Do one short test at home. Press record, confirm the cover looks right, then stop with **volume down**.
 
-iOS will not give apps your real Lock Screen. Screenshots of your Lock Screen and Home Screen are what make Lock mode look like your phone.
-
-A free Apple ID install expires after 7 days. Install Stage Cover the day before the play, or the morning of the play.
+A free Apple ID install expires after 7 days. Install BlacRec the day before the play, or the morning of the play.
 
 ## Build the app on Windows
 
-This PC cannot compile an iPhone app locally. A Mac in the cloud compiles it, then Sideloadly or AltStore on Windows signs it with your Apple ID and installs it on the iPhone 14.
-
-Expo Go cannot run this app. The camera controls and volume-button stop need the installed build.
-
 ### Path A — GitHub Actions, then Sideloadly (free Apple ID)
 
-1. Create a GitHub repository and push this folder to it. A public repository gets free Mac build minutes. A private repository spends the paid Mac minutes much faster.
+1. Push this folder to a GitHub repository.
 2. On GitHub, open **Actions**, choose **Build unsigned iPhone app**, and run it.
-3. When it finishes, download the artifact `StageCover-unsigned.ipa`.
-4. Install [Sideloadly](https://sideloadly.io/) on this PC (AltStore works too).
+3. When it finishes, download the artifact `BlacRec-unsigned.ipa`.
+4. Install [Sideloadly](https://sideloadly.io/) on this PC.
 5. Plug in the iPhone, unlock it, and tap Trust.
-6. Drag the IPA into Sideloadly, sign in with your normal Apple ID, and click Start.
+6. Drag the IPA into Sideloadly, sign in with your Apple ID, and click Start.
 7. On the iPhone, open Settings → General → VPN & Device Management and trust the developer certificate if iOS asks.
 
-If Apple says the app needs a verification code, it is emailed to that Apple ID. Enter it in Sideloadly.
-
 ### Path B — Expo EAS Build
-
-EAS can also compile the IPA. A device build asks for an Apple Developer Program membership (the paid account). A free Apple ID usually stops at that step, which is why Path A is the one that matches Sideloadly.
 
 ```bash
 npm install -g eas-cli
 npx eas-cli login
-npx eas-cli build --platform ios --profile sideload
+npx eas-cli build --platform ios --profile preview
 ```
-
-Download the IPA from the Expo site and install it with Sideloadly the same way as Path A.

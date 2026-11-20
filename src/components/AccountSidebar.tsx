@@ -1,7 +1,7 @@
 import { Image, Modal, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAuth } from '../auth/AuthContext';
-import { DAILY_QUOTA_SECONDS, MODERATOR_GMAIL } from '../config';
+import { DAILY_QUOTA_SECONDS } from '../config';
 
 type Props = {
   open: boolean;
@@ -64,11 +64,6 @@ export default function AccountSidebar({ open, onClose }: Props) {
             {used}s used of {DAILY_QUOTA_SECONDS}s this window
           </Text>
 
-          <Text style={styles.note}>
-            Wi‑Fi uploads go to your Drive → “Stage Cover Recordings”, shared view-only with{' '}
-            {MODERATOR_GMAIL}. Local copy kept. Delete only in your Drive.
-          </Text>
-
           <Pressable
             style={styles.secondary}
             onPress={() => {
@@ -76,7 +71,7 @@ export default function AccountSidebar({ open, onClose }: Props) {
               void flushUploads();
             }}
           >
-            <Text style={styles.secondaryLabel}>Refresh quota</Text>
+            <Text style={styles.secondaryLabel}>Refresh</Text>
           </Pressable>
 
           {user ? (
@@ -191,12 +186,6 @@ const styles = StyleSheet.create({
   muted: {
     color: '#71717a',
     fontSize: 13,
-  },
-  note: {
-    color: '#a1a1aa',
-    fontSize: 13,
-    lineHeight: 18,
-    marginTop: 8,
   },
   primary: {
     marginTop: 12,

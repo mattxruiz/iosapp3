@@ -1,14 +1,14 @@
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { AuthProvider } from './src/auth/AuthContext';
 import SignInGate from './src/components/SignInGate';
-import StageCover from './src/StageCover';
+import BlacRec from './src/BlacRec';
 
 export default function App() {
   return (
     <SafeAreaProvider>
       <AuthProvider>
         <SignInGate>
-          <StageCover />
+          <BlacRec />
         </SignInGate>
       </AuthProvider>
     </SafeAreaProvider>
