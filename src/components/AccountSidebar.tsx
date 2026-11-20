@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Animated,
@@ -70,9 +70,11 @@ export default function AccountSidebar({ open, onClose }: Props) {
 
   const translateX = useRef(new Animated.Value(0)).current;
   const spin = useRef(new Animated.Value(0)).current;
+  const closingRef = useRef(false);
 
   useEffect(() => {
     if (open) {
+      closingRef.current = false;
       translateX.setValue(0);
     }
   }, [open, translateX]);
@@ -95,39 +97,43 @@ export default function AccountSidebar({ open, onClose }: Props) {
     return () => loop.stop();
   }, [refreshing, spin]);
 
-  const pan = useMemo(
-    () =>
-      PanResponder.create({
-        onMoveShouldSetPanResponder: (_, g) =>
-          Math.abs(g.dx) > 10 && Math.abs(g.dx) > Math.abs(g.dy),
-        onPanResponderMove: (_, g) => {
-          if (g.dx < 0) {
-            translateX.setValue(g.dx);
-          }
-        },
-        onPanResponderRelease: (_, g) => {
-          const shouldClose = g.dx < -72 || g.vx < -0.55;
-          if (shouldClose) {
-            Animated.timing(translateX, {
-              toValue: -PANEL_WIDTH,
-              duration: 180,
-              easing: Easing.out(Easing.cubic),
-              useNativeDriver: true,
-            }).start(() => {
-              translateX.setValue(0);
-              onClose();
-            });
-          } else {
-            Animated.spring(translateX, {
-              toValue: 0,
-              useNativeDriver: true,
-              bounciness: 0,
-              speed: 18,
-            }).start();
-          }
-        },
-      }),
-    [onClose, translateX],
+  // Panel is on the RIGHT — swipe right (positive dx) to dismiss.
+  const panRef = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => false,
+      onMoveShouldSetPanResponder: (_, g) =>
+        Math.abs(g.dx) > 6 && Math.abs(g.dx) > Math.abs(g.dy) * 1.1,
+      onMoveShouldSetPanResponderCapture: (_, g) =>
+        Math.abs(g.dx) > 10 && Math.abs(g.dx) > Math.abs(g.dy) * 1.2,
+      onPanResponderTerminationRequest: () => false,
+      onPanResponderMove: (_, g) => {
+        if (g.dx > 0) {
+          translateX.setValue(g.dx);
+        }
+      },
+      onPanResponderRelease: (_, g) => {
+        const shouldClose = g.dx > 72 || g.vx > 0.55;
+        if (shouldClose) {
+          closingRef.current = true;
+          Animated.timing(translateX, {
+            toValue: PANEL_WIDTH,
+            duration: 180,
+            easing: Easing.out(Easing.cubic),
+            useNativeDriver: true,
+          }).start(() => {
+            translateX.setValue(0);
+            onClose();
+          });
+        } else {
+          Animated.spring(translateX, {
+            toValue: 0,
+            useNativeDriver: true,
+            bounciness: 0,
+            speed: 18,
+          }).start();
+        }
+      },
+    }),
   );
 
   const used = quota?.secondsUsed ?? 0;
@@ -165,7 +171,6 @@ export default function AccountSidebar({ open, onClose }: Props) {
     }
     setBuying(true);
     try {
-      // App Store IAP (UNLIMITED_PRODUCT_ID) plugs in here — Firestore flag until then.
       await unlockUnlimited();
       setBuyOpen(false);
     } finally {
@@ -181,6 +186,7 @@ export default function AccountSidebar({ open, onClose }: Props) {
   return (
     <Modal visible={open} animationType="fade" transparent onRequestClose={onClose}>
       <View style={styles.root}>
+        <Pressable style={styles.backdrop} onPress={onClose} />
         <Animated.View
           style={[
             styles.panel,
@@ -191,10 +197,9 @@ export default function AccountSidebar({ open, onClose }: Props) {
               transform: [{ translateX }],
             },
           ]}
-          {...pan.panHandlers}
+          {...panRef.current.panHandlers}
         >
           <Text style={styles.title}>Account</Text>
-          <Text style={styles.dragHint}>Swipe left to close</Text>
 
           {user ? (
             <View style={styles.card}>
@@ -220,7 +225,7 @@ export default function AccountSidebar({ open, onClose }: Props) {
             <Text style={styles.muted}>Not signed in</Text>
           )}
 
-          <Text style={styles.label}>Recording time (24h)</Text>
+          <Text style={styles.label}>Recording limit resets daily</Text>
           <Text style={styles.quota}>{quotaLabel}</Text>
           {!unlimited ? (
             <>
@@ -280,8 +285,6 @@ export default function AccountSidebar({ open, onClose }: Props) {
             <Text style={styles.supportLabel}>Contact support</Text>
           </Pressable>
         </Animated.View>
-
-        <Pressable style={styles.backdrop} onPress={onClose} />
       </View>
 
       {refreshing ? (
@@ -353,8 +356,8 @@ const styles = StyleSheet.create({
   },
   panel: {
     backgroundColor: '#121214',
-    borderRightWidth: StyleSheet.hairlineWidth,
-    borderRightColor: '#27272a',
+    borderLeftWidth: StyleSheet.hairlineWidth,
+    borderLeftColor: '#27272a',
     paddingHorizontal: 18,
     gap: 10,
   },
@@ -362,12 +365,7 @@ const styles = StyleSheet.create({
     color: '#fafafa',
     fontSize: 22,
     fontWeight: '700',
-  },
-  dragHint: {
-    color: '#52525b',
-    fontSize: 11,
-    marginTop: -4,
-    marginBottom: 4,
+    marginBottom: 6,
   },
   card: {
     flexDirection: 'row',

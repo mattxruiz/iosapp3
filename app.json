@@ -16,7 +16,10 @@
         "NSCameraUsageDescription": "BlacRec uses the camera to record the play.",
         "NSMicrophoneUsageDescription": "BlacRec records the play's sound with the video.",
         "ITSAppUsesNonExemptEncryption": false,
-        "UIBackgroundModes": ["audio", "processing"],
+        "UIBackgroundModes": [
+          "audio",
+          "processing"
+        ],
         "CFBundleURLTypes": [
           {
             "CFBundleURLSchemes": [
@@ -68,7 +71,8 @@
         }
       ],
       "expo-secure-store",
-      "expo-video"
+      "expo-video",
+      "expo-audio"
     ]
   }
 }

@@ -74,6 +74,8 @@ export type Settings = {
   autoSaveToPhotos: boolean;
   /** Keep recording when user leaves the app to use the phone normally. */
   usePhoneRegularly: boolean;
+  /** Manual camera zoom from fullscreen pinch; null = lens default. */
+  cameraZoom: number | null;
   userPresets: UserPreset[];
   activeUserPresetId: string | null;
 };
@@ -105,6 +107,7 @@ export const DEFAULT_SETTINGS: Settings = {
   tipsDismissed: false,
   autoSaveToPhotos: true,
   usePhoneRegularly: false,
+  cameraZoom: null,
   userPresets: [],
   activeUserPresetId: null,
 };
@@ -185,6 +188,10 @@ function migrate(raw: Partial<Settings>): Settings {
       typeof raw.usePhoneRegularly === 'boolean'
         ? raw.usePhoneRegularly
         : DEFAULT_SETTINGS.usePhoneRegularly,
+    cameraZoom:
+      typeof raw.cameraZoom === 'number' && Number.isFinite(raw.cameraZoom)
+        ? raw.cameraZoom
+        : DEFAULT_SETTINGS.cameraZoom,
     userPresets: Array.isArray(raw.userPresets) ? raw.userPresets : [],
     activeUserPresetId:
       typeof raw.activeUserPresetId === 'string' ? raw.activeUserPresetId : null,

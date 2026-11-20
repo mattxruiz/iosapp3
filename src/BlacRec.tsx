@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ElementRef } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -6,6 +6,8 @@ import {
   Dimensions,
   Image,
   Linking,
+  PanResponder,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -19,9 +21,16 @@ import { createAssetAsync, requestPermissionsAsync } from 'expo-media-library/le
 import * as Brightness from 'expo-brightness';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as ImagePicker from 'expo-image-picker';
+import { setAudioModeAsync } from 'expo-audio';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import * as ScreenOrientation from 'expo-screen-orientation';
 import { StatusBar } from 'expo-status-bar';
+import {
+  PinchGestureHandler,
+  State as GestureState,
+  type PinchGestureHandlerGestureEvent,
+  type PinchGestureHandlerStateChangeEvent,
+} from 'react-native-gesture-handler';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { VolumeManager } from 'react-native-volume-manager';
 import {
@@ -72,7 +81,7 @@ import {
   type TextPreset,
 } from './settings';
 
-type Phase = 'idle' | 'starting' | 'recording' | 'stopping';
+type Phase = 'idle' | 'standby' | 'starting' | 'recording' | 'stopping';
 
 const FPS_OPTIONS: FpsId[] = [24, 30, 60];
 const LOW_STORAGE_BYTES = 2.5 * 1024 * 1024 * 1024;
@@ -173,8 +182,16 @@ export default function BlacRec() {
   const [recordingsOpen, setRecordingsOpen] = useState(false);
   const [presetNameDraft, setPresetNameDraft] = useState('');
   const [renameDraft, setRenameDraft] = useState('');
+  const [previewSlot, setPreviewSlot] = useState({ x: 0, y: 0, w: 0, h: 0 });
+  const [previewExpanded, setPreviewExpanded] = useState(false);
+  const [liveZoom, setLiveZoom] = useState<number | null>(null);
 
   const phaseRef = useRef<Phase>('idle');
+  const previewSlotRef = useRef<ElementRef<typeof View>>(null);
+  const keepStandbyRef = useRef(false);
+  const pinchBaseZoomRef = useRef(1);
+  const exitStandbyRef = useRef<() => Promise<void>>(async () => {});
+  const armStandbyVolumeRef = useRef<() => Promise<void>>(async () => {});
   const settingsRef = useRef(settings);
   const canRecordRef = useRef(false);
   const cameraReadyRef = useRef(false);
@@ -225,7 +242,19 @@ export default function BlacRec() {
     return wideOnlyDevice ?? wideDevice;
   }, [frontDevice, settings.lens, ultraOnlyDevice, wideDevice, wideOnlyDevice]);
 
-  const zoom = device ? zoomFor(device, settings.lens) : undefined;
+  const lensZoom = device ? zoomFor(device, settings.lens) : undefined;
+  const zoom = (() => {
+    if (!device) {
+      return undefined;
+    }
+    if (liveZoom != null) {
+      return liveZoom;
+    }
+    if (settings.cameraZoom != null) {
+      return Math.min(device.maxZoom, Math.max(device.minZoom, settings.cameraZoom));
+    }
+    return lensZoom;
+  })();
   const recordAudio = settings.mic && microphonePermission.hasPermission;
   const videoOutput = useVideoOutput({
     targetResolution: RESOLUTION_SIZE[settings.resolution],
@@ -248,6 +277,55 @@ export default function BlacRec() {
   const activeText =
     settings.textPresets.find((item) => item.id === settings.activeTextPresetId) ?? null;
   const canRecord = coverReady(settings);
+  const win = Dimensions.get('window');
+
+  const expandPan = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => false,
+      onMoveShouldSetPanResponder: (_, g) =>
+        Math.abs(g.dy) > 10 && Math.abs(g.dy) > Math.abs(g.dx) * 1.1,
+      onMoveShouldSetPanResponderCapture: (_, g) =>
+        Math.abs(g.dy) > 14 && Math.abs(g.dy) > Math.abs(g.dx) * 1.2,
+      onPanResponderTerminationRequest: () => false,
+      onPanResponderRelease: (_, g) => {
+        if (g.dy > 40) {
+          setPreviewExpanded(true);
+        } else if (g.dy < -40) {
+          setPreviewExpanded(false);
+          setLiveZoom(null);
+        }
+      },
+    }),
+  ).current;
+
+  function onPinchGesture(event: PinchGestureHandlerGestureEvent) {
+    if (!device) {
+      return;
+    }
+    const next = Math.min(
+      device.maxZoom,
+      Math.max(device.minZoom, pinchBaseZoomRef.current * event.nativeEvent.scale),
+    );
+    setLiveZoom(next);
+  }
+
+  function onPinchStateChange(event: PinchGestureHandlerStateChangeEvent) {
+    if (event.nativeEvent.oldState === GestureState.ACTIVE && device) {
+      const next = Math.min(
+        device.maxZoom,
+        Math.max(
+          device.minZoom,
+          liveZoom ?? settings.cameraZoom ?? lensZoom ?? device.minZoom,
+        ),
+      );
+      pinchBaseZoomRef.current = next;
+      setLiveZoom(null);
+      setSettings((current) => ({ ...current, cameraZoom: next }));
+    } else if (event.nativeEvent.state === GestureState.BEGAN) {
+      pinchBaseZoomRef.current =
+        liveZoom ?? settings.cameraZoom ?? lensZoom ?? device?.minZoom ?? 1;
+    }
+  }
   canRecordRef.current = canRecord;
   const needsAppLock =
     settingsReady && settings.appLockEnabled && settings.appLockPin.length >= 4 && !appUnlocked;
@@ -466,6 +544,17 @@ export default function BlacRec() {
     setElapsedSec(0);
   }
 
+  async function returnAfterTake() {
+    if (keepStandbyRef.current) {
+      setPhase('standby');
+      setElapsedSec(0);
+      await armStandbyVolumeRef.current();
+      return;
+    }
+    setPhase('idle');
+    await finishCover();
+  }
+
   powerRef.current = () => {
     if (settingsRef.current.coverPreset !== 'lock') {
       return;
@@ -496,7 +585,15 @@ export default function BlacRec() {
     setTimeout(() => setMarkFlash(false), 500);
   };
 
-  async function armRecordingVolumeButtons() {
+  async function parkVolumeListener(
+    onDown: () => void,
+    onUp?: () => void,
+  ): Promise<void> {
+    const prior = releaseVolumeRef.current;
+    releaseVolumeRef.current = null;
+    if (prior) {
+      await prior().catch(() => {});
+    }
     const current = await VolumeManager.getVolume();
     previousVolumeRef.current = current.volume;
     let armed = false;
@@ -511,28 +608,24 @@ export default function BlacRec() {
       const goingDown =
         result.volume < lastVolume - 0.001 || (lastVolume <= 0.02 && result.volume <= 0.02);
       lastVolume = result.volume;
-      const lockMode = settingsRef.current.coverPreset === 'lock';
       if (goingUp) {
-        if (lockMode) {
-          // Volume up is only fake power in Lock mode. Marks use the tiny corner tap.
-          powerRef.current();
-          return;
-        }
-        markRef.current();
+        onUp?.();
+        void VolumeManager.setVolume(0.55, { showUI: false, playSound: false }).catch(() => {});
+        lastVolume = 0.55;
         return;
       }
       if (goingDown) {
-        void stopRef.current();
+        void VolumeManager.setVolume(0.55, { showUI: false, playSound: false }).catch(() => {});
+        lastVolume = 0.55;
+        onDown();
       }
     });
     await VolumeManager.showNativeVolumeUI({ enabled: false });
-    if (Math.abs(current.volume - 0.5) > 0.02) {
-      await VolumeManager.setVolume(0.5, { showUI: false, playSound: false });
-    }
+    await VolumeManager.setVolume(0.5, { showUI: false, playSound: false }).catch(() => {});
     lastVolume = 0.5;
     const armTimer = setTimeout(() => {
       armed = true;
-    }, 450);
+    }, 400);
     releaseVolumeRef.current = async () => {
       clearTimeout(armTimer);
       armed = false;
@@ -546,6 +639,96 @@ export default function BlacRec() {
       }
       await VolumeManager.showNativeVolumeUI({ enabled: true }).catch(() => {});
     };
+  }
+
+  async function armRecordingVolumeButtons() {
+    if (keepStandbyRef.current) {
+      await armStandbyVolumeRef.current();
+      return;
+    }
+    await parkVolumeListener(
+      () => {
+        void stopRef.current();
+      },
+      () => {
+        const lockMode = settingsRef.current.coverPreset === 'lock';
+        if (lockMode) {
+          powerRef.current();
+        } else {
+          markRef.current();
+        }
+      },
+    );
+  }
+
+  async function armStandbyVolumeButtons() {
+    let taps = 0;
+    let singleTimer: ReturnType<typeof setTimeout> | null = null;
+    await parkVolumeListener(() => {
+      taps += 1;
+      if (taps >= 2) {
+        if (singleTimer) {
+          clearTimeout(singleTimer);
+          singleTimer = null;
+        }
+        taps = 0;
+        // Double vol-down: start or stop take, stay on cover.
+        if (phaseRef.current === 'standby') {
+          void startRef.current();
+        } else if (phaseRef.current === 'recording' || phaseRef.current === 'starting') {
+          void stopRef.current();
+        }
+        return;
+      }
+      singleTimer = setTimeout(() => {
+        singleTimer = null;
+        taps = 0;
+        // Single vol-down: end take if any, leave cover → main.
+        void exitStandbyRef.current();
+      }, 420);
+    });
+  }
+
+  armStandbyVolumeRef.current = () => armStandbyVolumeButtons();
+
+  exitStandbyRef.current = async () => {
+    keepStandbyRef.current = false;
+    const current = phaseRef.current;
+    if (current === 'recording' || current === 'starting' || current === 'stopping') {
+      await stopRef.current();
+      return;
+    }
+    if (current === 'standby') {
+      setPhase('idle');
+      await finishCover();
+    }
+  };
+
+  async function enterStandby() {
+    if (phaseRef.current !== 'idle') {
+      return;
+    }
+    if (!canRecordRef.current) {
+      setMessage(
+        settingsRef.current.usePhoneRegularly
+          ? 'Not ready yet.'
+          : 'Set up a cover first.',
+      );
+      return;
+    }
+    keepStandbyRef.current = true;
+    setPreviewExpanded(false);
+    setPhase('standby');
+    try {
+      await activateKeepAwakeAsync();
+      previousBrightnessRef.current = await Brightness.getBrightnessAsync().catch(() => null);
+      await armStandbyVolumeButtons();
+    } catch (error) {
+      keepStandbyRef.current = false;
+      setPhase('idle');
+      setMessage(errorText(error));
+      await finishCover();
+    }
   }
 
   function clearStopWatch() {
@@ -660,8 +843,7 @@ export default function BlacRec() {
           handledRef.current = true;
           clearStopWatch();
           setSaving(false);
-          setPhase('idle');
-          await finishCover();
+          await returnAfterTake();
         })();
       },
       (error) => {
@@ -671,7 +853,6 @@ export default function BlacRec() {
         handledRef.current = true;
         clearStopWatch();
         recorderRef.current = null;
-        setPhase('idle');
         const text = errorText(error);
         if (/audio|microphone|mic/i.test(text)) {
           setSettings((current) => ({ ...current, mic: false }));
@@ -679,7 +860,7 @@ export default function BlacRec() {
         } else {
           setMessage(text);
         }
-        void finishCover();
+        void returnAfterTake();
       },
     );
     if (cancelRef.current && !isContinuation) {
@@ -693,22 +874,20 @@ export default function BlacRec() {
 
   continueRef.current = async () => {
     if (cancelRef.current) {
-      setPhase('idle');
-      await finishCover();
+      await returnAfterTake();
       return;
     }
     try {
       await beginRecorder(true);
     } catch (error) {
-      setPhase('idle');
       setMessage(errorText(error));
-      await finishCover();
+      await returnAfterTake();
     }
   };
 
   stopRef.current = async () => {
     const current = phaseRef.current;
-    if (current === 'idle' || current === 'stopping') {
+    if (current === 'idle' || current === 'standby' || current === 'stopping') {
       return;
     }
     cancelRef.current = true;
@@ -724,9 +903,8 @@ export default function BlacRec() {
           }
           handledRef.current = true;
           recorderRef.current = null;
-          setPhase('idle');
           setMessage('Recording stopped.');
-          void finishCover();
+          void returnAfterTake();
         }, 20000);
         await recorder.stopRecording();
         return;
@@ -738,14 +916,17 @@ export default function BlacRec() {
     if (current === 'starting') {
       return;
     }
-    setPhase('idle');
-    await finishCover();
+    await returnAfterTake();
   };
 
   startRef.current = async () => {
-    if (phaseRef.current !== 'idle' || !videoOutputRef.current) {
+    if (
+      (phaseRef.current !== 'idle' && phaseRef.current !== 'standby') ||
+      !videoOutputRef.current
+    ) {
       return;
     }
+    keepStandbyRef.current = phaseRef.current === 'standby';
     if (!canRecordRef.current) {
       setMessage(
         settingsRef.current.usePhoneRegularly
@@ -789,6 +970,12 @@ export default function BlacRec() {
       .then((power) => setLowPower(power))
       .catch(() => {});
 
+    // Background keep-alive needs an active mic session when using the phone regularly.
+    if (settingsRef.current.usePhoneRegularly && !settingsRef.current.mic) {
+      setSettings((current) => ({ ...current, mic: true }));
+      settingsRef.current = { ...settingsRef.current, mic: true };
+    }
+
     if (settingsRef.current.mic && !microphonePermission.hasPermission) {
       if (microphonePermission.canRequestPermission) {
         const granted = await microphonePermission.requestPermission();
@@ -817,21 +1004,30 @@ export default function BlacRec() {
 
     try {
       await activateKeepAwakeAsync();
+      if (settingsRef.current.usePhoneRegularly || settingsRef.current.mic) {
+        // Keep AVAudioSession alive so iOS can continue the take after Home.
+        await setAudioModeAsync({
+          allowsRecording: true,
+          playsInSilentMode: true,
+          allowsBackgroundRecording: true,
+          shouldPlayInBackground: true,
+        }).catch(() => {});
+      }
       previousBrightnessRef.current = await Brightness.getBrightnessAsync().catch(() => null);
       await armRecordingVolumeButtons();
       if (cancelRef.current) {
-        setPhase('idle');
-        await finishCover();
+        await returnAfterTake();
         return;
       }
       await beginRecorder(false);
       if (settingsRef.current.usePhoneRegularly && !cancelRef.current) {
-        // Leave to the real home screen; recording continues in background mode.
-        void goToPhoneHome();
+        // Android: jump to launcher. iOS: never suspend (kills the take) — user swipes Home.
+        if (Platform.OS === 'android') {
+          void goToPhoneHome();
+        }
       }
     } catch (error) {
       recorderRef.current = null;
-      setPhase('idle');
       const text = errorText(error);
       if (/audio|microphone|mic/i.test(text)) {
         setSettings((current) => ({ ...current, mic: false }));
@@ -839,7 +1035,7 @@ export default function BlacRec() {
       } else {
         setMessage(text);
       }
-      await finishCover();
+      await returnAfterTake();
     }
   };
 
@@ -991,9 +1187,22 @@ export default function BlacRec() {
       {device ? (
         <View
           style={
-            covering || !settings.showPreview
+            covering ||
+            (!settings.showPreview && !previewExpanded) ||
+            (!previewExpanded && previewSlot.w < 8)
               ? styles.hiddenCameraHost
-              : styles.previewWindowAbsolute
+              : previewExpanded && settings.showPreview
+                ? styles.previewFullscreenCamera
+                : {
+                    position: 'absolute',
+                    left: previewSlot.x,
+                    top: previewSlot.y,
+                    width: previewSlot.w,
+                    height: previewSlot.h,
+                    borderRadius: 16,
+                    overflow: 'hidden',
+                    zIndex: 1,
+                  }
           }
           pointerEvents="none"
         >
@@ -1001,7 +1210,12 @@ export default function BlacRec() {
             style={StyleSheet.absoluteFill}
             device={device}
             isActive={
-              cameraPermission.hasPermission && (covering || appActive || phase !== 'idle')
+              cameraPermission.hasPermission &&
+              (covering ||
+                appActive ||
+                phase !== 'idle' ||
+                settings.showPreview ||
+                previewExpanded)
             }
             outputs={[videoOutput]}
             constraints={constraints}
@@ -1045,30 +1259,40 @@ export default function BlacRec() {
             />
             <View style={styles.topBarSpacer} />
           </View>
-          <Text style={styles.quotaBanner}>
-            {quota?.unlimited
-              ? 'Unlimited recording · tap avatar for account'
-              : `${quotaLabel} left today · tap avatar for account`}
-          </Text>
-
-          <View style={styles.previewWindowSpacer}>
-            {!settings.showPreview ? (
-              <View style={styles.previewOff}>
-                <Text style={styles.previewOffLabel}>Preview hidden</Text>
-              </View>
-            ) : (
-              <View style={styles.previewWindowFrame} />
-            )}
-            <Pressable
-              style={styles.previewEyeOverlay}
-              onPress={() =>
-                setSettings((current) => ({ ...current, showPreview: !current.showPreview }))
-              }
+          {!previewExpanded ? (
+            <View
+              ref={previewSlotRef}
+              style={styles.previewWindowSpacer}
+              onLayout={() => {
+                previewSlotRef.current?.measureInWindow((x, y, w, h) => {
+                  setPreviewSlot({ x, y, w, h });
+                });
+              }}
+              {...expandPan.panHandlers}
             >
-              <Text style={styles.eyeLabel}>{settings.showPreview ? 'Hide' : 'Show'}</Text>
-            </Pressable>
-          </View>
+              {!settings.showPreview ? (
+                <CoverLookPreview
+                  usePhoneRegularly={settings.usePhoneRegularly}
+                  coverPreset={settings.coverPreset}
+                  coverUri={playlistUri}
+                  fit={settings.fit}
+                  activeText={activeText}
+                  lockWallpaperUri={settings.lockWallpaperUri}
+                  homeShotUri={settings.homeShotUri}
+                />
+              ) : (
+                <View style={styles.previewWindowFrame} />
+              )}
+              <View style={styles.previewDragCue} pointerEvents="none">
+                <View style={styles.previewDragBar} />
+                <Text style={styles.previewDragHint}>Drag down for fullscreen</Text>
+              </View>
+            </View>
+          ) : (
+            <View style={[styles.previewWindowSpacer, { opacity: 0 }]} pointerEvents="none" />
+          )}
 
+          {!previewExpanded ? (
           <ScrollView style={styles.panel} contentContainerStyle={styles.panelContent} bounces={false}>
             {!settings.tipsDismissed ? (
               <View style={styles.tipBox}>
@@ -1100,6 +1324,19 @@ export default function BlacRec() {
                 Prefer 1080p/30 and plug in.
               </Text>
             ) : null}
+
+            <Pressable style={styles.secondaryButton} onPress={() => setRecordingsOpen(true)}>
+              <Text style={styles.secondaryLabel}>Recordings</Text>
+            </Pressable>
+            <Pressable
+              style={styles.secondaryButton}
+              onPress={() => void enterStandby()}
+            >
+              <Text style={styles.secondaryLabel}>Standby</Text>
+            </Pressable>
+            <Text style={styles.note}>
+              Standby = cover only. Double vol-down start/stop. Single vol-down back to main.
+            </Text>
 
             <Text style={styles.label}>Presets</Text>
             {settings.userPresets.length === 0 ? (
@@ -1173,10 +1410,6 @@ export default function BlacRec() {
               </>
             ) : null}
 
-            <Pressable style={styles.secondaryButton} onPress={() => setRecordingsOpen(true)}>
-              <Text style={styles.secondaryLabel}>Recordings</Text>
-            </Pressable>
-
             <Text style={styles.label}>Auto-save to Photos</Text>
             <OptionRow
               options={[
@@ -1208,12 +1441,15 @@ export default function BlacRec() {
                 setSettings((current) => ({
                   ...current,
                   usePhoneRegularly: value === 'on',
+                  // Mic keeps the iOS audio session alive in background.
+                  mic: value === 'on' ? true : current.mic,
                 }))
               }
             />
             <Text style={styles.note}>
-              On = vol down starts recording and jumps to your home screen. No cover — using your
-              phone is the cover. Keep BlacRec in Recents.
+              On = no cover; recording keeps going when you leave the app. Android jumps Home after
+              start. On iPhone, swipe Home yourself (auto-suspend kills the take). Keep Sound On and
+              leave BlacRec in Recents.
             </Text>
 
             {!settings.usePhoneRegularly ? (
@@ -1504,6 +1740,7 @@ export default function BlacRec() {
               </Pressable>
             ) : null}
           </ScrollView>
+          ) : null}
         </SafeAreaView>
       ) : (
         <View style={styles.cover}>
@@ -1572,9 +1809,82 @@ export default function BlacRec() {
               onMark={() => markRef.current()}
             />
           ) : null}
+          {phase === 'standby' ? (
+            <View style={styles.standbyBadge} pointerEvents="none">
+              <Text style={styles.standbyBadgeText}>Standby · double vol↓ rec</Text>
+            </View>
+          ) : null}
           {markFlash ? <View style={styles.markFlash} pointerEvents="none" /> : null}
         </View>
       )}
+
+      {!covering && !previewExpanded ? (
+        <Pressable
+          style={[
+            styles.previewEyeHit,
+            previewSlot.w > 8
+              ? {
+                  left: previewSlot.x,
+                  top: previewSlot.y,
+                  width: previewSlot.w,
+                  height: previewSlot.h,
+                }
+              : styles.previewEyeHitFallback,
+          ]}
+          onPress={() =>
+            setSettings((current) => ({ ...current, showPreview: !current.showPreview }))
+          }
+        >
+          <View style={styles.eyePill}>
+            <Text style={styles.eyeLabel}>{settings.showPreview ? 'Hide' : 'Show'}</Text>
+          </View>
+        </Pressable>
+      ) : null}
+
+      {!covering && previewExpanded ? (
+        <View
+          style={[
+            styles.previewExpandedRoot,
+            { width: win.width, height: win.height },
+            !settings.showPreview && { backgroundColor: '#000' },
+          ]}
+        >
+          {!settings.showPreview ? (
+            <CoverLookPreview
+              usePhoneRegularly={settings.usePhoneRegularly}
+              coverPreset={settings.coverPreset}
+              coverUri={playlistUri}
+              fit={settings.fit}
+              activeText={activeText}
+              lockWallpaperUri={settings.lockWallpaperUri}
+              homeShotUri={settings.homeShotUri}
+            />
+          ) : (
+            <PinchGestureHandler
+              onGestureEvent={onPinchGesture}
+              onHandlerStateChange={onPinchStateChange}
+            >
+              <View style={StyleSheet.absoluteFill} collapsable={false} />
+            </PinchGestureHandler>
+          )}
+          <View style={styles.previewExpandedChrome} {...expandPan.panHandlers}>
+            <Pressable
+              style={styles.eyePill}
+              onPress={() =>
+                setSettings((current) => ({ ...current, showPreview: !current.showPreview }))
+              }
+            >
+              <Text style={styles.eyeLabel}>{settings.showPreview ? 'Hide' : 'Show'}</Text>
+            </Pressable>
+            <View style={styles.previewDragBar} />
+            <Text style={styles.previewDragHint}>
+              {settings.showPreview
+                ? 'Pinch to zoom · drag up for tools'
+                : 'Drag up for edit tools'}
+            </Text>
+          </View>
+        </View>
+      ) : null}
 
       <RecordingsLibrary visible={recordingsOpen} onClose={() => setRecordingsOpen(false)} />
 
@@ -1609,6 +1919,80 @@ export default function BlacRec() {
       ) : null}
     </View>
   );
+}
+
+function CoverLookPreview({
+  usePhoneRegularly,
+  coverPreset,
+  coverUri,
+  fit,
+  activeText,
+  lockWallpaperUri,
+  homeShotUri,
+}: {
+  usePhoneRegularly: boolean;
+  coverPreset: CoverPreset;
+  coverUri: string | null;
+  fit: FitId;
+  activeText: TextPreset | null;
+  lockWallpaperUri: string | null;
+  homeShotUri: string | null;
+}) {
+  if (usePhoneRegularly || coverPreset === 'black') {
+    return <View style={styles.coverLookRoot} />;
+  }
+
+  if (coverPreset === 'image' && coverUri) {
+    return (
+      <Image
+        source={{ uri: coverUri }}
+        style={styles.coverLookRoot}
+        resizeMode={fit === 'fill' ? 'cover' : 'contain'}
+      />
+    );
+  }
+
+  if (coverPreset === 'text' && activeText) {
+    return (
+      <View style={[styles.coverLookRoot, { backgroundColor: activeText.background }]}>
+        {activeText.layers.map((layer) => (
+          <Text
+            key={layer.id}
+            numberOfLines={2}
+            style={{
+              position: 'absolute',
+              left: `${Math.max(4, Math.min(70, layer.x * 100))}%`,
+              top: `${Math.max(4, Math.min(80, layer.y * 100))}%`,
+              width: '55%',
+              textAlign: 'center',
+              color: layer.color,
+              fontSize: Math.max(10, Math.round(layer.size * 0.35)),
+              fontWeight: '700',
+            }}
+          >
+            {layer.text}
+          </Text>
+        ))}
+      </View>
+    );
+  }
+
+  if (coverPreset === 'lock') {
+    const uri = lockWallpaperUri ?? homeShotUri;
+    return (
+      <View style={styles.coverLookRoot}>
+        {uri ? (
+          <Image source={{ uri }} style={StyleSheet.absoluteFill} resizeMode="cover" />
+        ) : null}
+        <View style={styles.coverLookLockChrome}>
+          <Text style={styles.coverLookLockTime}>9:41</Text>
+          <Text style={styles.coverLookLockDate}>Lock cover</Text>
+        </View>
+      </View>
+    );
+  }
+
+  return <View style={styles.coverLookRoot} />;
 }
 
 function OptionRow<T extends string>({
@@ -1674,12 +2058,6 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '700',
   },
-  quotaBanner: {
-    color: '#a1a1aa',
-    fontSize: 12,
-    paddingHorizontal: 16,
-    marginBottom: 8,
-  },
   recChip: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1697,30 +2075,31 @@ const styles = StyleSheet.create({
   topBarSpacer: {
     width: 52,
   },
-  eyeLabel: {
-    color: '#fafafa',
-    fontSize: 13,
-    fontWeight: '700',
-    textShadowColor: 'rgba(0,0,0,0.65)',
-    textShadowOffset: { width: 0, height: 1 },
-    textShadowRadius: 3,
-  },
-  previewEyeOverlay: {
-    ...StyleSheet.absoluteFill,
+  previewEyeHit: {
+    position: 'absolute',
+    zIndex: 20,
     alignItems: 'center',
     justifyContent: 'center',
-    zIndex: 3,
   },
-  previewWindowAbsolute: {
-    position: 'absolute',
+  previewEyeHitFallback: {
     top: 92,
     alignSelf: 'center',
     width: '72%',
     aspectRatio: 3 / 4,
     maxHeight: 240,
-    borderRadius: 16,
-    overflow: 'hidden',
-    zIndex: 1,
+  },
+  eyePill: {
+    backgroundColor: 'rgba(10,10,12,0.72)',
+    borderRadius: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.28)',
+  },
+  eyeLabel: {
+    color: '#fafafa',
+    fontSize: 13,
+    fontWeight: '700',
   },
   previewWindowSpacer: {
     alignSelf: 'center',
@@ -1734,19 +2113,79 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(255,255,255,0.12)',
   },
   previewWindowFrame: { flex: 1 },
-  previewOff: {
+  previewDragCue: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 8,
+    alignItems: 'center',
+  },
+  previewDragBar: {
+    width: 36,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: 'rgba(255,255,255,0.45)',
+    marginBottom: 4,
+  },
+  previewDragHint: {
+    color: 'rgba(255,255,255,0.45)',
+    fontSize: 10,
+  },
+  previewFullscreenCamera: {
+    ...StyleSheet.absoluteFill,
+    zIndex: 40,
+  },
+  previewExpandedRoot: {
+    ...StyleSheet.absoluteFill,
+    backgroundColor: 'transparent',
+    zIndex: 45,
+  },
+  previewExpandedChrome: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    paddingBottom: 28,
+    paddingTop: 16,
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: 'rgba(0,0,0,0.35)',
+  },
+  standbyBadge: {
+    position: 'absolute',
+    top: 54,
+    alignSelf: 'center',
+    zIndex: 40,
+    backgroundColor: 'rgba(24,24,27,0.75)',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 999,
+  },
+  standbyBadgeText: {
+    color: '#a1a1aa',
+    fontSize: 12,
+    fontWeight: '700',
+    letterSpacing: 0.4,
+  },
+  coverLookRoot: {
+    ...StyleSheet.absoluteFill,
+    backgroundColor: '#000',
+  },
+  coverLookLockChrome: {
     ...StyleSheet.absoluteFill,
     alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#111',
-    paddingHorizontal: 28,
+    paddingTop: '18%',
   },
-  previewOffLabel: {
-    color: '#71717a',
-    fontSize: 13,
-    position: 'absolute',
-    bottom: 18,
-    alignSelf: 'center',
+  coverLookLockTime: {
+    color: '#fafafa',
+    fontSize: 28,
+    fontWeight: '200',
+    letterSpacing: 1,
+  },
+  coverLookLockDate: {
+    color: 'rgba(250,250,250,0.75)',
+    fontSize: 11,
+    marginTop: 2,
   },
   hiddenCameraHost: {
     position: 'absolute',

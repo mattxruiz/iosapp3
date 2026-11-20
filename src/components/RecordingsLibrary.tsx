@@ -1,7 +1,15 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Animated,
   Dimensions,
   FlatList,
   Modal,
@@ -15,6 +23,7 @@ import {
 import { useEvent } from 'expo';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import Svg, { Path } from 'react-native-svg';
 import { formatTimer } from '../settings';
 import {
   type AppRecording,
@@ -32,6 +41,23 @@ type Props = {
   visible: boolean;
   onClose: () => void;
 };
+
+const DELETE_WIDTH = 84;
+
+function TrashIcon() {
+  return (
+    <Svg width={22} height={22} viewBox="0 0 24 24" fill="none">
+      <Path
+        d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2m2 0v12a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V7h12Z"
+        stroke="#fecaca"
+        strokeWidth={1.7}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <Path d="M10 11v6M14 11v6" stroke="#fecaca" strokeWidth={1.7} strokeLinecap="round" />
+    </Svg>
+  );
+}
 
 export default function RecordingsLibrary({ visible, onClose }: Props) {
   const [items, setItems] = useState<AppRecording[]>([]);
@@ -53,6 +79,43 @@ export default function RecordingsLibrary({ visible, onClose }: Props) {
       setActive(null);
     }
   }, [visible, refresh]);
+
+  function confirmDeleteItem(item: AppRecording) {
+    Alert.alert(
+      'Delete recording?',
+      item.photosAssetId ? 'Also delete the Photos copy?' : 'Remove from BlacRec?',
+      item.photosAssetId
+        ? [
+            { text: 'Cancel', style: 'cancel' },
+            {
+              text: 'App only',
+              onPress: () => void runDeleteItem(item, false),
+            },
+            {
+              text: 'App + Photos',
+              style: 'destructive',
+              onPress: () => void runDeleteItem(item, true),
+            },
+          ]
+        : [
+            { text: 'Cancel', style: 'cancel' },
+            {
+              text: 'Delete',
+              style: 'destructive',
+              onPress: () => void runDeleteItem(item, false),
+            },
+          ],
+    );
+  }
+
+  async function runDeleteItem(item: AppRecording, photosToo: boolean) {
+    try {
+      await deleteRecording(item, photosToo);
+      await refresh();
+    } catch (error) {
+      Alert.alert('Delete failed', error instanceof Error ? error.message : 'Unknown error');
+    }
+  }
 
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
@@ -80,11 +143,12 @@ export default function RecordingsLibrary({ visible, onClose }: Props) {
                 data={items}
                 keyExtractor={(item) => item.id}
                 contentContainerStyle={styles.list}
-                ListEmptyComponent={
-                  <Text style={styles.empty}>No recordings yet.</Text>
-                }
+                ListEmptyComponent={<Text style={styles.empty}>No recordings yet.</Text>}
                 renderItem={({ item }) => (
-                  <Pressable style={styles.row} onPress={() => setActive(item)}>
+                  <SwipeableRow
+                    onOpen={() => setActive(item)}
+                    onDelete={() => confirmDeleteItem(item)}
+                  >
                     <View style={{ flex: 1 }}>
                       <Text style={styles.rowTitle}>{formatRecordingStamp(item.createdAt)}</Text>
                       <Text style={styles.rowMeta}>
@@ -92,7 +156,7 @@ export default function RecordingsLibrary({ visible, onClose }: Props) {
                       </Text>
                     </View>
                     <Text style={styles.chev}>›</Text>
-                  </Pressable>
+                  </SwipeableRow>
                 )}
               />
             )}
@@ -100,6 +164,74 @@ export default function RecordingsLibrary({ visible, onClose }: Props) {
         )}
       </SafeAreaView>
     </Modal>
+  );
+}
+
+function SwipeableRow({
+  children,
+  onOpen,
+  onDelete,
+}: {
+  children: ReactNode;
+  onOpen: () => void;
+  onDelete: () => void;
+}) {
+  const x = useRef(new Animated.Value(0)).current;
+  const openRef = useRef(false);
+
+  const pan = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => false,
+      onMoveShouldSetPanResponder: (_, g) =>
+        Math.abs(g.dx) > 8 && Math.abs(g.dx) > Math.abs(g.dy) * 1.15,
+      onMoveShouldSetPanResponderCapture: (_, g) =>
+        Math.abs(g.dx) > 12 && Math.abs(g.dx) > Math.abs(g.dy) * 1.2,
+      onPanResponderTerminationRequest: () => false,
+      onPanResponderMove: (_, g) => {
+        const next = Math.min(0, Math.max(-DELETE_WIDTH, g.dx));
+        x.setValue(next);
+      },
+      onPanResponderRelease: (_, g) => {
+        const shouldOpen = g.dx < -DELETE_WIDTH / 2 || g.vx < -0.4;
+        openRef.current = shouldOpen;
+        Animated.spring(x, {
+          toValue: shouldOpen ? -DELETE_WIDTH : 0,
+          useNativeDriver: true,
+          bounciness: 0,
+          speed: 20,
+        }).start();
+      },
+    }),
+  ).current;
+
+  return (
+    <View style={styles.swipeWrap}>
+      <Pressable style={styles.deleteAction} onPress={onDelete}>
+        <TrashIcon />
+      </Pressable>
+      <Animated.View
+        style={[styles.row, { transform: [{ translateX: x }] }]}
+        {...pan.panHandlers}
+      >
+        <Pressable
+          style={styles.rowInner}
+          onPress={() => {
+            if (openRef.current) {
+              openRef.current = false;
+              Animated.spring(x, {
+                toValue: 0,
+                useNativeDriver: true,
+                bounciness: 0,
+              }).start();
+              return;
+            }
+            onOpen();
+          }}
+        >
+          {children}
+        </Pressable>
+      </Animated.View>
+    </View>
   );
 }
 
@@ -133,20 +265,21 @@ function RecordingPlayer({
     [draft.markers, draft.durationSec],
   );
 
-  const pan = useMemo(
-    () =>
-      PanResponder.create({
-        onMoveShouldSetPanResponder: (_, g) => Math.abs(g.dy) > 8,
-        onPanResponderRelease: (_, g) => {
-          if (g.dy > 48) {
-            setExpanded(true);
-          } else if (g.dy < -48) {
-            setExpanded(false);
-          }
-        },
-      }),
-    [],
-  );
+  // Dedicated handle — VideoView steals pans if handlers sit on the same view.
+  const dragPan = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: (_, g) => Math.abs(g.dy) > 4,
+      onPanResponderTerminationRequest: () => false,
+      onPanResponderRelease: (_, g) => {
+        if (g.dy > 36 || g.vy > 0.4) {
+          setExpanded(true);
+        } else if (g.dy < -36 || g.vy < -0.4) {
+          setExpanded(false);
+        }
+      },
+    }),
+  ).current;
 
   async function persistMarkers(next: RecordingMarker[]) {
     const updated = await updateRecordingMarkers(draft.id, next);
@@ -278,16 +411,19 @@ function RecordingPlayer({
           styles.videoWrap,
           expanded && { flex: 1, height: undefined, maxHeight: winH },
         ]}
-        {...pan.panHandlers}
       >
-        <VideoView style={styles.video} player={player} nativeControls={false} contentFit="contain" />
-        {!expanded ? (
-          <Text style={styles.dragHint}>Drag down for fullscreen</Text>
-        ) : (
-          <Pressable style={styles.shrinkHit} onPress={() => setExpanded(false)}>
-            <Text style={styles.dragHint}>Drag up or tap to shrink</Text>
-          </Pressable>
-        )}
+        <VideoView
+          style={styles.video}
+          player={player}
+          nativeControls={false}
+          contentFit="contain"
+        />
+        <View style={styles.dragHandle} {...dragPan.panHandlers}>
+          <View style={styles.dragBar} />
+          <Text style={styles.dragHint}>
+            {expanded ? 'Drag up to shrink' : 'Drag down for fullscreen'}
+          </Text>
+        </View>
       </View>
 
       <View style={[styles.transport, expanded && styles.transportExpanded]}>
@@ -400,13 +536,26 @@ const styles = StyleSheet.create({
   link: { color: '#a1a1aa', fontSize: 14, fontWeight: '600' },
   list: { padding: 14, gap: 8 },
   empty: { color: '#71717a', textAlign: 'center', marginTop: 40 },
+  swipeWrap: {
+    marginBottom: 8,
+    borderRadius: 12,
+    overflow: 'hidden',
+    backgroundColor: '#3f1d1d',
+  },
+  deleteAction: {
+    ...StyleSheet.absoluteFill,
+    alignItems: 'flex-end',
+    justifyContent: 'center',
+    paddingRight: 28,
+  },
   row: {
-    flexDirection: 'row',
-    alignItems: 'center',
     backgroundColor: '#18181b',
     borderRadius: 12,
+  },
+  rowInner: {
+    flexDirection: 'row',
+    alignItems: 'center',
     padding: 12,
-    marginBottom: 8,
   },
   rowTitle: { color: '#fafafa', fontSize: 15, fontWeight: '600' },
   rowMeta: { color: '#71717a', fontSize: 12, marginTop: 3 },
@@ -418,18 +567,27 @@ const styles = StyleSheet.create({
     backgroundColor: '#000',
   },
   video: { width: '100%', height: '100%' },
-  dragHint: {
+  dragHandle: {
     position: 'absolute',
-    bottom: 8,
-    alignSelf: 'center',
-    color: 'rgba(255,255,255,0.4)',
-    fontSize: 10,
-  },
-  shrinkHit: {
-    ...StyleSheet.absoluteFill,
-    justifyContent: 'flex-end',
-    alignItems: 'center',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    paddingTop: 18,
     paddingBottom: 10,
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    backgroundColor: 'rgba(0,0,0,0.25)',
+  },
+  dragBar: {
+    width: 36,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: 'rgba(255,255,255,0.45)',
+    marginBottom: 6,
+  },
+  dragHint: {
+    color: 'rgba(255,255,255,0.45)',
+    fontSize: 10,
   },
   transport: {
     flexDirection: 'row',
